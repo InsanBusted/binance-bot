@@ -1,0 +1,3 @@
+CMD di folder binance bot
+ketik "venv\Scripts\activate"
+Ketik "python bot.py"
