@@ -3,11 +3,36 @@ Dikomputer
 	ketik "venv\Scripts\activate"
 	Ketik "python bot-v2.py"
 	
-Di VPS
+Cek apa aja yang lagi nyala
+	"pm2 list" buat cek servis apa aja yang nyala
+
+ada perubahan kode dari lokal mau update ke VPS
+INI CMD LOKAL
+	"git status" cek file yang diubah
+	"git add ." tambahin file yang diubah
+	"git push origin main" update perubahan global
+	
+INI VPS
 	cmd, ketik ssh "ssh root@72.61.214.14"
 	masukin passowrd
 	ketik "ls" cek folder
 	ketik "cd (foldernya)"
 	"ls"
 	"cd binance-bot"
+	"git pull origin main" (update perubahan dari cmd lokal) kalau perubahan dari file bot.py update pm2nya juga
+	"pm2 restart" perubahan kalau file botnya berubah
 	
+Cek logs
+	"pm2 list" cek servis nyala
+	"pm2 logs (nama servisnya)" cek kalo ada eror dll
+	
+buat matiin pm2
+	"pm2 stop binance-bot" buat matiin sementara
+	"pm2 start binance-bot" buat nyalain lagi
+	
+Buat baru pm2
+	"pm2 start ./venv/bin/python3 --name binance-bot -- bot.py"
+	"pm2 startup"
+	"pm2 save"
+	"pm2 logs" buat pastiin
+	"pm2 list" buat cek servis apa aja yang nyala
