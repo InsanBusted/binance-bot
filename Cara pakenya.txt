@@ -1,3 +1,13 @@
-CMD di folder binance bot
-ketik "venv\Scripts\activate"
-Ketik "python bot-v2.py"
+Dikomputer
+	CMD di folder binance bot
+	ketik "venv\Scripts\activate"
+	Ketik "python bot-v2.py"
+	
+Di VPS
+	cmd, ketik ssh "ssh root@72.61.214.14"
+	masukin passowrd
+	ketik "ls" cek folder
+	ketik "cd (foldernya)"
+	"ls"
+	"cd binance-bot"
+	
