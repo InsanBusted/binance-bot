@@ -10,6 +10,7 @@ ada perubahan kode dari lokal mau update ke VPS
 INI CMD LOKAL
 	"git status" cek file yang diubah
 	"git add ." tambahin file yang diubah
+	"git commit -m "tambahin file"
 	"git push origin main" update perubahan global
 	
 INI VPS
@@ -31,7 +32,7 @@ buat matiin pm2
 	"pm2 start binance-bot" buat nyalain lagi
 	
 Buat baru pm2
-	"pm2 start ./venv/bin/python3 --name binance-bot -- bot.py"
+	"pm2 start ./venv/bin/python3 --name binance-bot-eth -- bot-eth-scalp.py"
 	"pm2 startup"
 	"pm2 save"
 	"pm2 logs" buat pastiin
