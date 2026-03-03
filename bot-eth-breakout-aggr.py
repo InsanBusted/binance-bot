@@ -1,3 +1,7 @@
+#!/usr/bin/env python3
+# ETH TESTNET - SUPER AGGRESSIVE MOMENTUM BREAKOUT
+# WARNING: TESTNET ONLY. High risk, high variance.
+
 import os
 import time
 import pandas as pd
@@ -7,7 +11,7 @@ from decimal import Decimal, ROUND_DOWN, ROUND_CEILING
 from datetime import datetime, timezone
 
 # ======================
-# CONFIG (ETH PULLBACK SCALP - HIGH WINRATE)
+# CONFIG (SUPER AGGRESSIVE)
 # ======================
 SYMBOL = "ETHUSDT"
 
@@ -17,42 +21,47 @@ TF_ENTRY = "15m"
 
 # Trend filter
 EMA_TREND_LEN = 200  # EMA200 on 1H
-
-# Entry indicators (15m)
 EMA_FAST = 20
 EMA_SLOW = 50
+
+# Momentum indicators
 RSI_LEN = 14
+ADX_LEN = 14
 
-# Pullback rules
-RSI_PULL_MIN = 45
-RSI_PULL_MAX = 55
-PULLBACK_MAX_DIST = 0.0018  # 0.18% max distance from EMA20 to qualify as "pullback near EMA20"
+# Breakout rules
+BREAKOUT_LOOKBACK = 6          # breakout above/below last N closed candles
+RSI_LONG_MIN = 60
+RSI_SHORT_MAX = 40
+ADX_MIN = 20                   # trade only if momentum/trend exists
 
-# Leverage
-LEVERAGE = 10
+# Leverage (AGGRESSIVE)
+LEVERAGE = 15
 
-# Risk-based sizing (lebih aman untuk scalping)
-RISK_PCT = 0.02  # 2% equity risk per trade
+# Risk (AGGRESSIVE)
+RISK_PCT = 0.03                # 3% equity risk per trade (BRUTAL)
 
-# ATR-based SL/TP (15m) - clamp biar scalping
+# SL/TP via ATR% clamp (tighter = more size + more whipsaw)
 ATR_LEN = 14
-MIN_SL_PCT = 0.006   # 0.6%
-MAX_SL_PCT = 0.012   # 1.2%
-TP_R_MULT = 2.2      # TP = 2.2R (enak untuk winrate 55–60%)
+MIN_SL_PCT = 0.005             # 0.5%
+MAX_SL_PCT = 0.010             # 1.0%
+TP_R_MULT = 2.5                # TP = 2.5R (big hits when it runs)
 
 # Exchange constraints
 MIN_NOTIONAL_USD = 100.0
 
-# Safety
-MAX_TRADES_PER_DAY = 20
-COOLDOWN_MINUTES = 45
-MAX_DAILY_DRAWDOWN_PCT = 0.03  # stop harian -3% equity
-MAX_NOTIONAL_CAP_RATIO = 0.20  # cap notional at 20% of (equity * leverage)
+# Safety (still keep a kill switch, but wide)
+MAX_TRADES_PER_DAY = 30
+COOLDOWN_MINUTES = 10
+MAX_DAILY_DRAWDOWN_PCT = 0.25  # allow up to -25% per day before stopping (TEST)
+MAX_NOTIONAL_CAP_RATIO = 0.40  # cap notional at 40% of (equity * leverage)
 
-SLEEP_SECONDS = 30
+SLEEP_SECONDS = 10
 
 # Testnet endpoint (UM Futures)
 FUTURES_TESTNET_URL = "https://testnet.binancefuture.com"
+
+# Volatility sanity filter (skip absurd candles)
+MAX_CANDLE_RANGE_ATR_MULT = 3.0  # if last candle range > 3*ATR -> skip (news spike)
 
 # ======================
 # SETUP CLIENT
@@ -104,7 +113,10 @@ def quantize_up(value: float, step: str) -> float:
 # HELPERS
 # ======================
 def set_leverage() -> None:
-    client.futures_change_leverage(symbol=SYMBOL, leverage=LEVERAGE)
+    try:
+        client.futures_change_leverage(symbol=SYMBOL, leverage=LEVERAGE)
+    except Exception as e:
+        print("WARN set_leverage:", e)
 
 def get_mark_price() -> float:
     mp = client.futures_mark_price(symbol=SYMBOL)
@@ -133,9 +145,9 @@ def rsi(series: pd.Series, length: int) -> pd.Series:
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(length).mean()
-    avg_loss = loss.rolling(length).mean()
-    rs = avg_gain / avg_loss
+    avg_gain = gain.ewm(alpha=1/length, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/length, adjust=False).mean()
+    rs = avg_gain / (avg_loss.replace(0, 1e-12))
     return 100 - (100 / (1 + rs))
 
 def atr(df: pd.DataFrame, length: int) -> pd.Series:
@@ -148,7 +160,34 @@ def atr(df: pd.DataFrame, length: int) -> pd.Series:
         (high - prev_close).abs(),
         (low - prev_close).abs()
     ], axis=1).max(axis=1)
-    return tr.rolling(length).mean()
+    return tr.ewm(alpha=1/length, adjust=False).mean()
+
+def adx(df: pd.DataFrame, length: int = 14) -> pd.Series:
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+
+    up = high.diff()
+    down = -low.diff()
+
+    plus_dm = pd.Series(0.0, index=df.index)
+    minus_dm = pd.Series(0.0, index=df.index)
+
+    plus_dm[(up > down) & (up > 0)] = up[(up > down) & (up > 0)]
+    minus_dm[(down > up) & (down > 0)] = down[(down > up) & (down > 0)]
+
+    tr = pd.concat([
+        (high - low),
+        (high - close.shift(1)).abs(),
+        (low - close.shift(1)).abs()
+    ], axis=1).max(axis=1)
+
+    atr_s = tr.ewm(alpha=1/length, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(alpha=1/length, adjust=False).mean() / (atr_s.replace(0, 1e-12)))
+    minus_di = 100 * (minus_dm.ewm(alpha=1/length, adjust=False).mean() / (atr_s.replace(0, 1e-12)))
+
+    dx = (100 * (plus_di - minus_di).abs() / ((plus_di + minus_di).replace(0, 1e-12)))
+    return dx.ewm(alpha=1/length, adjust=False).mean()
 
 # ======================
 # POSITION / ORDERS
@@ -157,9 +196,7 @@ def get_position_amt() -> float:
     positions = client.futures_position_information(symbol=SYMBOL)
     if not positions:
         return 0.0
-    for p in positions:
-        return float(p.get("positionAmt", 0.0))
-    return 0.0
+    return float(positions[0].get("positionAmt", 0.0))
 
 def has_open_position() -> bool:
     return get_position_amt() != 0.0
@@ -215,8 +252,11 @@ def place_entry_and_bracket(side: str, qty: float, sl_price: float, tp_price: fl
 def calc_qty_risk_based(entry_price: float, sl_pct: float) -> float:
     equity = get_wallet_balance()
     risk_usd = equity * RISK_PCT
-    notional = risk_usd / sl_pct
 
+    # If SL is sl_pct of price, expected loss (approx) = notional * sl_pct
+    notional = risk_usd / max(sl_pct, 1e-9)
+
+    # Cap notional so you don't full-send everything (still aggressive)
     max_notional = equity * LEVERAGE * MAX_NOTIONAL_CAP_RATIO
     if notional > max_notional:
         print("WARN notional capped:", round(notional, 2), "->", round(max_notional, 2))
@@ -255,91 +295,103 @@ def trend_bias_1h(df1h: pd.DataFrame) -> str:
         return "SHORT"
     return "NONE"
 
-def pullback_entry_15m(df15: pd.DataFrame, bias: str):
+def breakout_signal_15m(df15: pd.DataFrame, bias: str):
     """
-    High-winrate pullback entry:
-    - Trend 15m: EMA20 vs EMA50 must align with bias
-    - Pullback: candle must be near/touch EMA20 (not far from it)
-    - RSI must be in pullback zone 45–55 and turning back with direction
-    - Candle close confirms direction
+    Aggressive momentum breakout:
+    LONG:
+      - bias LONG (1H EMA200)
+      - 15m EMA20 > EMA50
+      - RSI >= 60
+      - ADX >= 20
+      - last closed close > max(high) of last N closed candles (excluding itself)
+    SHORT:
+      - bias SHORT
+      - 15m EMA20 < EMA50
+      - RSI <= 40
+      - ADX >= 20
+      - last closed close < min(low) of last N closed candles (excluding itself)
     """
+    if bias not in ("LONG", "SHORT"):
+        return None
+
     df = df15.copy()
     df["ema20"] = ema(df["close"], EMA_FAST)
     df["ema50"] = ema(df["close"], EMA_SLOW)
     df["rsi"] = rsi(df["close"], RSI_LEN)
     df["atr"] = atr(df, ATR_LEN)
+    df["adx"] = adx(df, ADX_LEN)
 
-    c = df.iloc[-2]     # last closed
-    p = df.iloc[-3]     # prev closed
+    c = df.iloc[-2]   # last closed
+    prevs = df.iloc[-(BREAKOUT_LOOKBACK+2):-2]  # N candles before c
 
+    cl = float(c["close"])
     o = float(c["open"])
     h = float(c["high"])
     l = float(c["low"])
-    cl = float(c["close"])
 
     ema20 = float(c["ema20"])
     ema50 = float(c["ema50"])
-    r = float(c["rsi"]) if pd.notna(c["rsi"]) else None
-    r_prev = float(p["rsi"]) if pd.notna(p["rsi"]) else None
-    atr_val = float(c["atr"]) if pd.notna(c["atr"]) else None
+    r = float(c["rsi"])
+    atr_val = float(c["atr"])
+    ax = float(c["adx"])
 
-    if r is None or r_prev is None or atr_val is None:
+    # Volatility sanity: skip absurd spike candle
+    candle_range = h - l
+    if atr_val > 0 and candle_range > (atr_val * MAX_CANDLE_RANGE_ATR_MULT):
         return None
 
-    # ATR -> SL% clamp
-    sl_pct = atr_val / cl
+    if ax < ADX_MIN:
+        return None
+
+    # SL% from ATR% clamp
+    sl_pct = (atr_val / max(cl, 1e-9)) if atr_val > 0 else MIN_SL_PCT
     sl_pct = max(MIN_SL_PCT, min(MAX_SL_PCT, sl_pct))
     tp_pct = sl_pct * TP_R_MULT
 
-    # pullback distance to EMA20 (use close as reference)
-    dist = abs(cl - ema20) / cl
-    near_ema20 = dist <= PULLBACK_MAX_DIST
-
-    # "touch" logic: wick touches EMA20 area
-    touched_ema20 = (l <= ema20 <= h)
-
-    # RSI in pullback zone
-    rsi_in_pull_zone = (RSI_PULL_MIN <= r <= RSI_PULL_MAX)
-
-    bullish_close = cl > o
-    bearish_close = cl < o
-
-    # Trend alignment on 15m
-    up_trend_15m = ema20 > ema50
-    down_trend_15m = ema20 < ema50
+    max_prev_high = float(prevs["high"].max())
+    min_prev_low = float(prevs["low"].min())
 
     if bias == "LONG":
-        if not up_trend_15m:
+        if not (ema20 > ema50):
             return None
-
-        # Pullback requirement: price must be near/touch EMA20
-        if not (near_ema20 or touched_ema20):
+        if r < RSI_LONG_MIN:
             return None
-
-        # RSI pullback then start rising
-        if not (rsi_in_pull_zone and r >= r_prev):
+        # Breakout condition
+        if cl <= max_prev_high:
             return None
-
-        # Candle confirmation
-        if not bullish_close:
+        # Confirm candle not purely wick reversal (optional but helps)
+        if cl <= o:
             return None
-
-        return {"side": "BUY", "sl_pct": sl_pct, "tp_pct": tp_pct, "ema20": ema20, "ema50": ema50, "rsi": r, "dist": dist}
+        return {
+            "side": "BUY",
+            "sl_pct": sl_pct,
+            "tp_pct": tp_pct,
+            "ema20": ema20,
+            "ema50": ema50,
+            "rsi": r,
+            "adx": ax,
+            "break_level": max_prev_high
+        }
 
     if bias == "SHORT":
-        if not down_trend_15m:
+        if not (ema20 < ema50):
             return None
-
-        if not (near_ema20 or touched_ema20):
+        if r > RSI_SHORT_MAX:
             return None
-
-        if not (rsi_in_pull_zone and r <= r_prev):
+        if cl >= min_prev_low:
             return None
-
-        if not bearish_close:
+        if cl >= o:
             return None
-
-        return {"side": "SELL", "sl_pct": sl_pct, "tp_pct": tp_pct, "ema20": ema20, "ema50": ema50, "rsi": r, "dist": dist}
+        return {
+            "side": "SELL",
+            "sl_pct": sl_pct,
+            "tp_pct": tp_pct,
+            "ema20": ema20,
+            "ema50": ema50,
+            "rsi": r,
+            "adx": ax,
+            "break_level": min_prev_low
+        }
 
     return None
 
@@ -348,7 +400,7 @@ def pullback_entry_15m(df15: pd.DataFrame, bias: str):
 # ======================
 def main() -> None:
     set_leverage()
-    print("ETH PULLBACK SCALP START (TESTNET)", SYMBOL, "| TF:", TF_TREND, "+", TF_ENTRY, "| Lev:", LEVERAGE)
+    print("ETH MOMENTUM BREAKOUT START (TESTNET)", SYMBOL, "| TF:", TF_TREND, "+", TF_ENTRY, "| Lev:", LEVERAGE)
 
     last_15m_close_time = None
     trades_today = 0
@@ -395,7 +447,7 @@ def main() -> None:
                 continue
 
             # fetch 15m candles, run once per close
-            df15 = get_klines(SYMBOL, TF_ENTRY, limit=300)
+            df15 = get_klines(SYMBOL, TF_ENTRY, limit=350)
             last_closed_15 = df15.iloc[-2]
             close_time_15 = last_closed_15["close_time"]
 
@@ -414,11 +466,11 @@ def main() -> None:
             cancel_all_open_orders()
 
             # bias 1h
-            df1h = get_klines(SYMBOL, TF_TREND, limit=400)
+            df1h = get_klines(SYMBOL, TF_TREND, limit=450)
             bias = trend_bias_1h(df1h)
 
-            # pullback entry 15m
-            sig = pullback_entry_15m(df15, bias)
+            # breakout entry 15m
+            sig = breakout_signal_15m(df15, bias)
 
             print(
                 close_time_15,
@@ -432,8 +484,8 @@ def main() -> None:
                 continue
 
             price = get_mark_price()
-            sl_pct = sig["sl_pct"]
-            tp_pct = sig["tp_pct"]
+            sl_pct = float(sig["sl_pct"])
+            tp_pct = float(sig["tp_pct"])
             side = sig["side"]
 
             qty = calc_qty_risk_based(price, sl_pct)
@@ -455,8 +507,9 @@ def main() -> None:
                 "| mark:", round(price, 2),
                 "| SL%:", round(sl_pct * 100, 3),
                 "| TP%:", round(tp_pct * 100, 3),
-                "| dist_to_EMA20%:", round(sig["dist"] * 100, 3),
-                "| RSI:", round(sig["rsi"], 2),
+                "| RSI:", round(float(sig["rsi"]), 2),
+                "| ADX:", round(float(sig["adx"]), 2),
+                "| break_level:", round(float(sig["break_level"]), 2),
                 "| notional~:", round(approx_notional, 2)
             )
 
@@ -467,7 +520,7 @@ def main() -> None:
             time.sleep(SLEEP_SECONDS)
 
         except Exception as e:
-            print("ERROR:", e)
+            print("ERROR:", repr(e))
             time.sleep(SLEEP_SECONDS)
 
 if __name__ == "__main__":
