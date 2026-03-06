@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # bot-ethusdc-v9.7.1-ultimate.py
 # ETHUSDC USD-M Futures - HYBRID Trend & Range
-# V9.7.1: FIX BUG Break-Even, FIX Death Loop API, & TESTNET READY
+# V9.7.1: FIX BUG Break-Even, FIX Death Loop API, & TESTNET READY + OPTIMIZED TRADE MANAGEMENT
 
 import os
 import time
@@ -39,9 +39,9 @@ MAX_FORCED_RISK_PCT = 0.035
 MAX_DAILY_DRAWDOWN_PCT = 0.06
 MAX_MARGIN_FRACTION = 0.75
 
-# TRADE MANAGEMENT
-BE_ACTIVATION_RR = 0.35     
-BE_BUFFER_PCT = 0.00015     
+# TRADE MANAGEMENT (UPDATE OPTIMISASI BE & FEE)
+BE_ACTIVATION_RR = 0.6      # Diperbesar agar posisi punya ruang bernapas
+BE_BUFFER_PCT = 0.0004      # Diperbesar agar BE selalu menutup fee
 
 # VOLATILITY REGIME FILTER
 VOL_ATR_LEN_15M = 14
@@ -437,21 +437,45 @@ def manage_break_even(st, mark_price, tick_size, qty_q):
 
     if profit_r >= BE_ACTIVATION_RR:
         try:
+            # 1. Cari dan simpan ID STOP_MARKET yang sedang aktif
             open_orders = call_with_retry(client.futures_get_open_orders, symbol=SYMBOL, recvWindow=RECV_WINDOW)
+            existing_stop_orders = []
             for o in open_orders:
                 if o["type"] == "STOP_MARKET":
-                    call_with_retry(client.futures_cancel_order, symbol=SYMBOL, orderId=o["orderId"], recvWindow=RECV_WINDOW)
+                    existing_stop_orders.append(o["orderId"])
             
+            # Kalkulasi harga Break-Even dan sisi order
             op_side = "SELL" if side == "LONG" else "BUY"
             if side == "LONG": be_price = entry_price * (1 + BE_BUFFER_PCT)
             else: be_price = entry_price * (1 - BE_BUFFER_PCT)
             
             be_price_q = _round_tick(be_price, tick_size)
-            call_with_retry(client.futures_create_order, symbol=SYMBOL, side=op_side, type="STOP_MARKET", stopPrice=be_price_q, closePosition=True, workingType="MARK_PRICE", recvWindow=RECV_WINDOW)
             
+            # 2. Buat STOP_MARKET break-even terlebih dahulu
+            new_be_order = call_with_retry(
+                client.futures_create_order, 
+                symbol=SYMBOL, 
+                side=op_side, 
+                type="STOP_MARKET", 
+                stopPrice=be_price_q, 
+                closePosition=True, 
+                workingType="MARK_PRICE", 
+                recvWindow=RECV_WINDOW
+            )
+            
+            # 3 & 4. Jika order SL BE baru berhasil dibuat, baru cancel STOP_MARKET lama
+            if new_be_order and "orderId" in new_be_order:
+                for oid in existing_stop_orders:
+                    try:
+                        call_with_retry(client.futures_cancel_order, symbol=SYMBOL, orderId=oid, recvWindow=RECV_WINDOW)
+                    except Exception as cancel_e:
+                        print(f"[!] Peringatan: Gagal membatalkan SL lama dengan ID {oid}. Error: {cancel_e}")
+            
+            # Update state & kirim notifikasi
             st["be_activated"] = True
             save_state(st)
             send_telegram(f"🛡️ ETH Break-Even Activated!\nProfit capai {BE_ACTIVATION_RR}R.\nSL aman di titik impas: {be_price_q}")
+            
         except Exception as e:
             print(f"Error activating BE: {e}")
 
@@ -652,10 +676,11 @@ def main():
 
             if (notional_q / LEVERAGE) > (equity_now * MAX_MARGIN_FRACTION): time.sleep(SLEEP_SLOW); continue
             
+            # UPDATE FILTER FEE: diubah menjadi 3.0
             est_fee = (notional_q * TAKER_FEE_PCT) * 2.0
             rr = (TREND_RR if st["mode"] == "TREND" else RANGE_RR) * tp_mult
             
-            if (qty_q * (sl_dist_est * rr)) <= est_fee * 1.5: time.sleep(SLEEP_SLOW); continue
+            if (qty_q * (sl_dist_est * rr)) <= est_fee * 3.0: time.sleep(SLEEP_SLOW); continue
 
             if notional_q >= min_notional and qty_q > 0:
                 actual_price, sl_final, tp_final, sl_dist_actual = place_order_with_actual_bracket(side, qty_q, atr_val, st["mode"], price, sl_mult, tp_mult)
