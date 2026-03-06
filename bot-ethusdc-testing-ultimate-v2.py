@@ -489,9 +489,11 @@ def manage_break_even(st, mark_price, tick_size, qty_q):
         )
 
         stop_order_id = None
+        old_stop_price = None
         for o in open_orders:
             if o.get("type") == "STOP_MARKET":
                 stop_order_id = o.get("orderId")
+                old_stop_price = float(o.get("stopPrice", 0.0))
                 break
 
         op_side = "SELL" if side == "LONG" else "BUY"
@@ -510,30 +512,60 @@ def manage_break_even(st, mark_price, tick_size, qty_q):
                 recvWindow=RECV_WINDOW
             )
 
-        new_be_order = call_with_retry(
-            client.futures_create_order,
-            symbol=SYMBOL,
-            side=op_side,
-            type="STOP_MARKET",
-            stopPrice=be_price_q,
-            closePosition=True,
-            workingType="MARK_PRICE",
-            recvWindow=RECV_WINDOW
-        )
-
-        if new_be_order and "orderId" in new_be_order:
-            st["be_activated"] = True
-            save_state(st)
-            send_telegram(
-                f"🛡️ ETH Break-Even Activated!\n"
-                f"Profit capai {BE_ACTIVATION_RR}R.\n"
-                f"SL aman di titik impas: {be_price_q}"
+        try:
+            new_be_order = call_with_retry(
+                client.futures_create_order,
+                symbol=SYMBOL,
+                side=op_side,
+                type="STOP_MARKET",
+                stopPrice=be_price_q,
+                closePosition=True,
+                workingType="MARK_PRICE",
+                recvWindow=RECV_WINDOW
             )
 
+            if new_be_order and "orderId" in new_be_order:
+                st["be_activated"] = True
+                save_state(st)
+                send_telegram(
+                    f"🛡️ ETH Break-Even Activated!\n"
+                    f"Profit capai {BE_ACTIVATION_RR}R.\n"
+                    f"SL aman di titik impas: {be_price_q}"
+                )
+                return
+
+        except Exception as be_err:
+            # coba restore SL lama jika ada
+            if old_stop_price and old_stop_price > 0:
+                try:
+                    restore_price_q = _round_tick(old_stop_price, tick_size)
+                    call_with_retry(
+                        client.futures_create_order,
+                        symbol=SYMBOL,
+                        side=op_side,
+                        type="STOP_MARKET",
+                        stopPrice=restore_price_q,
+                        closePosition=True,
+                        workingType="MARK_PRICE",
+                        recvWindow=RECV_WINDOW
+                    )
+                    send_telegram(
+                        f"⚠️ Break-even gagal, SL lama berhasil dipulihkan.\nErr: {be_err}"
+                    )
+                except Exception as restore_err:
+                    send_telegram(
+                        f"🚨 FATAL BE: gagal pasang BE dan gagal restore SL lama.\n"
+                        f"BE Err: {be_err}\nRestore Err: {restore_err}"
+                    )
+
+            st["be_failed_once"] = True
+            save_state(st)
+            print(f"🚨 Error activating BE: {be_err}")
+
     except Exception as e:
-        print(f"🚨 Error activating BE: {e}. Mencegah percobaan BE ulang untuk posisi ini.")
         st["be_failed_once"] = True
         save_state(st)
+        print(f"🚨 Error activating BE: {e}")
 
 # =========================
 # MAIN LOOP
