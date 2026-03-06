@@ -21,7 +21,7 @@ from requests.exceptions import ReadTimeout, ConnectionError
 # =========================
 # TESTNET FORCE ENTRY MODE
 # =========================
-FORCE_TEST_ENTRY = True
+FORCE_TEST_ENTRY = False
 FORCE_TEST_SIDE = "BUY"
 
 # =========================
