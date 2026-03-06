@@ -1,0 +1,33 @@
+{
+  "be_activated": false,
+  "be_failed_once": false,
+  "cooldown_until": "2026-03-06T14:01:47.434165+00:00",
+  "daily_locked": true,
+  "daily_realized_pnl": -19.590889999999998,
+  "day_key": "2026-03-06",
+  "entry_price": 0.0,
+  "force_test_done": true,
+  "last_pnl_check_ms": 1772805347723,
+  "loss_streak": 0,
+  "mode": "TREND",
+  "pos_side": "",
+  "prev_in_position": false,
+  "qty_q": 0.0,
+  "seen_tran_ids": [
+    9650146664230,
+    9650146688235,
+    9650146688236,
+    9650146685484,
+    9650146676685,
+    9650146661103,
+    9650146661104,
+    9650146661105,
+    9650046657778,
+    9650146665903,
+    9650146694030,
+    9650046651127
+  ],
+  "sl_dist_actual": 0.0,
+  "start_equity_today": 4761.61819764,
+  "trades_today": 12
+}
