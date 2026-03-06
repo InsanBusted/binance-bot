@@ -413,6 +413,39 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
         time.sleep(2.0)
         brackets_ok = True
         
+        # FORCE TEST: bypass semua filter sizing
+        step_size = float(_get_symbol_filters(SYMBOL)["LOT_SIZE"]["stepSize"])
+        qty_q = _quantize_step(0.05, step_size)   # kecil saja untuk test
+        atr_val = float(last_closed["atr"])
+        sl_mult = 1.0
+        tp_mult = 1.0
+
+        actual_price, sl_final, tp_final, sl_dist_actual = place_order_with_actual_bracket(
+            side, qty_q, atr_val, st["mode"], price, sl_mult, tp_mult
+        )
+
+        st.update({
+            "trades_today": int(st.get("trades_today", 0)) + 1,
+            "cooldown_until": _dt_to_iso(now + pd.Timedelta(minutes=COOLDOWN_MINUTES)),
+            "entry_price": actual_price,
+            "sl_dist_actual": sl_dist_actual,
+            "pos_side": "LONG",
+            "qty_q": qty_q,
+            "be_activated": False
+        })
+        save_state(st)
+
+        send_telegram(
+            f"🧪 FORCE ENTRY {SYMBOL} {side}\n"
+            f"Qty: {qty_q}\n"
+            f"Entry: {actual_price:.2f}\n"
+            f"SL: {sl_final} | TP: {tp_final}\n"
+            f"Reason: {reason}"
+        )
+
+        time.sleep(SLEEP_SLOW)
+        continue
+                
     except Exception as e:
         print(f"CRITICAL ERROR: Failed Bracket. Emergency close. Error: {e}")
         try:
