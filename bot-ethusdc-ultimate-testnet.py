@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# bot-ethusdc-v9.7.1-ultimate.py
+# bot-ethusdc-v9.7.1-ultimate-fixed.py
 # ETHUSDC USD-M Futures - HYBRID Trend & Range
-# V9.7.1: FIX BUG Break-Even, FIX Death Loop API, & TESTNET READY
+# TESTNET READY & DEBUG MODE ADDED
 
 import os
 import time
@@ -19,6 +19,15 @@ from binance.client import Client
 from requests.exceptions import ReadTimeout, ConnectionError
 
 # =========================
+# TESTNET DEBUG CONFIG
+# =========================
+# Ubah FORCE_TEST_ENTRY ke True HANYA JIKA Anda ingin memaksa bot membuka 1 posisi
+# untuk mengetes entry, SL, TP, dan notifikasi Telegram.
+FORCE_TEST_ENTRY = False
+FORCE_TEST_SIDE = "BUY"  # Pilih "BUY" atau "SELL"
+SKIP_STRICT_BRACKET_CHECK = True # Matikan pengecekan ketat untuk Testnet yang sering delay
+
+# =========================
 # CONFIGURASI BOT & MODAL
 # =========================
 SYMBOL = "ETHUSDC"           
@@ -27,7 +36,6 @@ TF_REGIME = "15m"
 TF_ENTRY = "5m"
 TAKER_FEE_PCT = 0.0005
 
-# Parameter Small Account
 RISK_PCT = 0.012             
 MAX_FORCED_RISK_PCT = 0.035
 MAX_DAILY_DRAWDOWN_PCT = 0.06
@@ -55,7 +63,7 @@ TREND_DEADBAND_PCT = 0.0008
 VOL_SPIKE_MULT = 1.20      
 VOL_PULLBACK_MULT = 0.50   
 
-# TREND (Disesuaikan untuk ETH)
+# TREND
 EMA_FAST = 9
 EMA_SLOW = 21
 RSI_LEN = 14
@@ -68,7 +76,7 @@ TREND_SL_MAX_PCT = 0.0100
 PULLBACK_ATR_TOL = 0.25  
 TREND_CONFIRM_ATR_TOL = 0.10
 
-# RANGE (Disesuaikan untuk ETH)
+# RANGE
 DONCHIAN_LEN = 20
 RSI_RANGE_LONG_MIN = 45
 RSI_RANGE_SHORT_MAX = 55
@@ -139,7 +147,6 @@ def log_loop(now, equity, mode, bias, active_bias, reason, dbg):
 # SETUP BINANCE TESTNET
 # =========================
 load_dotenv(dotenv_path=".env")
-# MENGGUNAKAN API TESTNET DAN TESTNET=TRUE
 client = Client(os.getenv("BINANCE_TESTNET_API_KEY"), os.getenv("BINANCE_TESTNET_API_SECRET"), testnet=True)
 client.REQUEST_TIMEOUT = 60
 
@@ -190,10 +197,17 @@ def get_position_amt():
     except: return 0.0
     return float(pos[0].get("positionAmt", 0.0)) if pos else 0.0
 
-def get_unrealized_pnl():
-    try: pos = call_with_retry(client.futures_position_information, symbol=SYMBOL, recvWindow=RECV_WINDOW)
-    except: return 0.0
-    return float(pos[0].get("unRealizedProfit", 0.0)) if pos else 0.0
+def get_mark_price(): return float(call_with_retry(client.futures_mark_price, symbol=SYMBOL)["markPrice"])
+
+def klines_df(symbol, interval, limit):
+    raw = call_with_retry(client.futures_klines, symbol=symbol, interval=interval, limit=limit)
+    df = pd.DataFrame(raw, columns=["open_time","open","high","low","close","volume","close_time","qav","nt","tbb","tbq","ign"])
+    for c in ["open","high","low","close","volume"]: df[c] = df[c].astype(float)
+    return df
+
+def cancel_all_open_orders():
+    try: call_with_retry(client.futures_cancel_all_open_orders, symbol=SYMBOL, recvWindow=RECV_WINDOW)
+    except: pass
 
 def realized_pnl_since(start_ms, seen_tran_ids):
     try:
@@ -206,18 +220,6 @@ def realized_pnl_since(start_ms, seen_tran_ids):
                 seen_tran_ids.add(tid)
         return total
     except: return 0.0
-
-def cancel_all_open_orders():
-    try: call_with_retry(client.futures_cancel_all_open_orders, symbol=SYMBOL, recvWindow=RECV_WINDOW)
-    except: pass
-
-def get_mark_price(): return float(call_with_retry(client.futures_mark_price, symbol=SYMBOL)["markPrice"])
-
-def klines_df(symbol, interval, limit):
-    raw = call_with_retry(client.futures_klines, symbol=symbol, interval=interval, limit=limit)
-    df = pd.DataFrame(raw, columns=["open_time","open","high","low","close","volume","close_time","qav","nt","tbb","tbq","ign"])
-    for c in ["open","high","low","close","volume"]: df[c] = df[c].astype(float)
-    return df
 
 # =========================
 # INDIKATOR & SINYAL
@@ -296,7 +298,6 @@ def signal_trend_mode(df5, bias, adx15):
     prev = df5.iloc[-3] if len(df5) >= 3 else last
 
     if not pd.notna(last["atr"]) or float(last["atr"]) <= 0: return None, "atr_bad", bias
-    
     vs = float(last["vol_sma"]) if pd.notna(last["vol_sma"]) else 0.0
     v = float(last["volume"])
     if vs <= 0: return None, "vol_sma_bad", bias
@@ -361,18 +362,12 @@ def signal_range_mode(df5):
 # =========================
 # EKSEKUSI & MANAJEMEN ORDER
 # =========================
-def _ensure_brackets_exist():
-    try:
-        oo = call_with_retry(client.futures_get_open_orders, symbol=SYMBOL, recvWindow=RECV_WINDOW)
-        types = {o.get("type") for o in (oo or [])}
-        return ("STOP_MARKET" in types) and ("TAKE_PROFIT_MARKET" in types)
-    except: return False
-
 def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mode: str, mark_price: float, sl_mult: float=1.0, tp_mult: float=1.0):
     filters = _get_symbol_filters(SYMBOL)
     tick = float(filters["PRICE_FILTER"]["tickSize"])
     cancel_all_open_orders()
 
+    print(f"[*] Mengeksekusi MARKET {side} sebesar {qty_q} {SYMBOL}")
     call_with_retry(client.futures_create_order, symbol=SYMBOL, side=side, type="MARKET", quantity=qty_q, recvWindow=RECV_WINDOW)
 
     actual_entry = 0.0
@@ -387,7 +382,9 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
         except: pass
         if actual_entry > 0: break
 
-    if actual_entry <= 0.0: actual_entry = float(mark_price)
+    if actual_entry <= 0.0: 
+        actual_entry = float(mark_price)
+        print("[!] Peringatan: Gagal mengambil actual entry, menggunakan mark_price.")
 
     raw_sl_dist = (atr_val * TREND_SL_ATR_MULT) if mode == "TREND" else (atr_val * RANGE_SL_ATR_MULT)
     sl_min_pct = TREND_SL_MIN_PCT if mode == "TREND" else RANGE_SL_MIN_PCT
@@ -406,64 +403,22 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
     sl_q, tp_q = _round_tick(sl_price, tick), _round_tick(tp_price, tick)
 
     try:
-        call_with_retry(client.futures_create_order, symbol=SYMBOL, side=op_side, type="STOP_MARKET", stopPrice=sl_q, closePosition=True, workingType="MARK_PRICE", recvWindow=RECV_WINDOW)
-        call_with_retry(client.futures_create_order, symbol=SYMBOL, side=op_side, type="TAKE_PROFIT_MARKET", stopPrice=tp_q, closePosition=True, workingType="MARK_PRICE", recvWindow=RECV_WINDOW)
+        print(f"[*] Memasang Brackets -> SL: {sl_q} | TP: {tp_q}")
         
-        # TEST MODE: skip strict bracket verification
-        time.sleep(2.0)
-        brackets_ok = True
+        res_sl = call_with_retry(client.futures_create_order, symbol=SYMBOL, side=op_side, type="STOP_MARKET", stopPrice=sl_q, closePosition=True, workingType="MARK_PRICE", recvWindow=RECV_WINDOW)
+        print(f"[+] SL Berhasil dipasang. ID: {res_sl.get('orderId')}")
         
-        # FORCE TEST: bypass semua filter sizing
-        step_size = float(_get_symbol_filters(SYMBOL)["LOT_SIZE"]["stepSize"])
-        qty_q = _quantize_step(0.05, step_size)   # kecil saja untuk test
-        atr_val = float(last_closed["atr"])
-        sl_mult = 1.0
-        tp_mult = 1.0
+        res_tp = call_with_retry(client.futures_create_order, symbol=SYMBOL, side=op_side, type="TAKE_PROFIT_MARKET", stopPrice=tp_q, closePosition=True, workingType="MARK_PRICE", recvWindow=RECV_WINDOW)
+        print(f"[+] TP Berhasil dipasang. ID: {res_tp.get('orderId')}")
 
-        actual_price, sl_final, tp_final, sl_dist_actual = place_order_with_actual_bracket(
-            side, qty_q, atr_val, st["mode"], price, sl_mult, tp_mult
-        )
-
-        st.update({
-            "trades_today": int(st.get("trades_today", 0)) + 1,
-            "cooldown_until": _dt_to_iso(now + pd.Timedelta(minutes=COOLDOWN_MINUTES)),
-            "entry_price": actual_price,
-            "sl_dist_actual": sl_dist_actual,
-            "pos_side": "LONG",
-            "qty_q": qty_q,
-            "be_activated": False
-        })
-        save_state(st)
-
-        send_telegram(
-            f"🧪 FORCE ENTRY {SYMBOL} {side}\n"
-            f"Qty: {qty_q}\n"
-            f"Entry: {actual_price:.2f}\n"
-            f"SL: {sl_final} | TP: {tp_final}\n"
-            f"Reason: {reason}"
-        )
-
-        time.sleep(SLEEP_SLOW)
-        send_telegram(
-            f"🧪 FORCE ENTRY {SYMBOL} {side}"
-        )
-
-        time.sleep(SLEEP_SLOW)
-                
     except Exception as e:
-        print(f"CRITICAL ERROR: Failed Bracket. Emergency close. Error: {e}")
+        print(f"[!] CRITICAL ERROR saat memasang Bracket: {e}")
         try:
             call_with_retry(client.futures_create_order, symbol=SYMBOL, side=op_side, type="MARKET", quantity=qty_q, reduceOnly=True, recvWindow=RECV_WINDOW)
-            send_telegram(f"🚨 EMERGENCY: Gagal pasang SL/TP. Posisi DITUTUP OTOMATIS! Err: {e}")
-            
-            # PERBAIKAN: PAKSA SIMPAN COOLDOWN AGAR TIDAK DEATH LOOP
-            st_temp = load_state({})
-            st_temp["cooldown_until"] = _dt_to_iso(datetime.now(timezone.utc) + pd.Timedelta(minutes=COOLDOWN_MINUTES))
-            save_state(st_temp)
-            
+            send_telegram(f"🚨 EMERGENCY: Gagal pasang SL/TP. Posisi DITUTUP OTOMATIS!\nAlasan: {e}")
         except Exception as ex:
-            send_telegram(f"💀 FATAL: Gagal pasang SL/TP dan gagal close. CEK BINANCE MANUAL. Err: {repr(ex)}")
-        raise
+            send_telegram(f"💀 FATAL: Gagal pasang SL/TP dan gagal close. CEK BINANCE MANUAL.\nErr: {repr(ex)}")
+        raise e
 
     return actual_entry, sl_q, tp_q, sl_dist
 
@@ -604,13 +559,23 @@ def main():
             last_closed = _last_closed(df5)
             price = float(last_closed["close"])
 
-            active_bias = "NONE"
-            if st["mode"] == "TREND": side, reason, active_bias = signal_trend_mode(df5, bias, float(adx15))
-            else: side, reason, active_bias = signal_range_mode(df5)
+            # ---------------------------
+            # LOGIKA ENTRY
+            # ---------------------------
+            if FORCE_TEST_ENTRY:
+                side = FORCE_TEST_SIDE
+                reason = "FORCE_TEST_ENTRY_ACTIVE"
+                active_bias = "LONG" if side == "BUY" else "SHORT"
+                print(f"[*] FORCE_TEST_ENTRY menyala. Memaksa posisi {side}.")
+            else:
+                if st["mode"] == "TREND": 
+                    side, reason, active_bias = signal_trend_mode(df5, bias, float(adx15))
+                else: 
+                    side, reason, active_bias = signal_range_mode(df5)
 
-            if vol_regime == "LOW_VOL" and reason in ("trend_breakout_entry",):
-                side = None
-                reason = "blocked_low_vol_breakout"
+                if vol_regime == "LOW_VOL" and reason in ("trend_breakout_entry",):
+                    side = None
+                    reason = "blocked_low_vol_breakout"
 
             dbg = {
                 "price": price, "adx15": float(adx15), "ema9": float(last_closed.get("ema9", 0.0)), "ema21": float(last_closed.get("ema21", 0.0)), 
@@ -620,10 +585,10 @@ def main():
             }
             log_loop(now, equity_now, st["mode"], bias, active_bias, reason, dbg)
 
+            # Jika tidak ada sinyal (dan FORCE_TEST_ENTRY = False), tunggu candle berikutnya
             if side is None:
-                side = "BUY"
-                reason = "FORCE_TEST_ENTRY"
-                active_bias = "LONG"
+                time.sleep(SLEEP_SLOW)
+                continue
 
             sl_mult = 1.0
             tp_mult = 1.0
@@ -650,7 +615,8 @@ def main():
                 notional_q = qty_q * price
                 if ((qty_q * sl_dist_est) / max(equity_now, 1e-9)) > MAX_FORCED_RISK_PCT:
                     print(f"Skip: Risk melebihi MAX_FORCED_RISK ({MAX_FORCED_RISK_PCT*100}%)")
-                    time.sleep(SLEEP_SLOW); continue
+                    time.sleep(SLEEP_SLOW)
+                    continue
 
             if (notional_q / LEVERAGE) > (equity_now * MAX_MARGIN_FRACTION): time.sleep(SLEEP_SLOW); continue
             
@@ -659,13 +625,14 @@ def main():
             
             if (qty_q * (sl_dist_est * rr)) <= est_fee * 1.5: time.sleep(SLEEP_SLOW); continue
 
+            # EKSEKUSI ORDER
             if notional_q >= min_notional and qty_q > 0:
                 actual_price, sl_final, tp_final, sl_dist_actual = place_order_with_actual_bracket(side, qty_q, atr_val, st["mode"], price, sl_mult, tp_mult)
                 
-                # FIX V9.7.1: pos_side konversi
+                # Simpan State: Menjamin cooldown tersimpan setelah entry sukses
                 st.update({
                     "trades_today": int(st.get("trades_today", 0)) + 1,
-                    "cooldown_until": _dt_to_iso(now + pd.Timedelta(minutes=COOLDOWN_MINUTES)),
+                    "cooldown_until": _dt_to_iso(datetime.now(timezone.utc) + pd.Timedelta(minutes=COOLDOWN_MINUTES)),
                     "entry_price": actual_price,
                     "sl_dist_actual": sl_dist_actual,
                     "pos_side": "LONG" if side == "BUY" else "SHORT",
@@ -674,12 +641,20 @@ def main():
                 })
                 save_state(st)
 
-                send_telegram(f"🚀 ENTRY {SYMBOL} {side}\nMode: {st['mode']} ({vol_regime})\nQty: {qty_q}\nEntry: {actual_price:.2f}\nSL: {sl_final} | TP: {tp_final}\nRisk~ ${(qty_q * sl_dist_actual):.2f}\nReason: {reason}")
+                msg = (f"🚀 ENTRY {SYMBOL} {side}\n"
+                       f"Mode: {st['mode']} ({vol_regime})\n"
+                       f"Qty: {qty_q}\n"
+                       f"Entry: {actual_price:.2f}\n"
+                       f"SL: {sl_final} | TP: {tp_final}\n"
+                       f"Risk~ ${(qty_q * sl_dist_actual):.2f}\n"
+                       f"Reason: {reason}")
+                send_telegram(msg)
 
             time.sleep(SLEEP_SLOW)
 
         except Exception as e:
             msg = str(e)
+            print(f"[ERROR MAIN LOOP]: {msg}")
             if ("Timestamp for this request" in msg) or ("recvWindow" in msg) or ("-1021" in msg):
                 sync_time_offset()
                 last_time_sync = time.time()
