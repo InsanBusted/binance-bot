@@ -48,6 +48,7 @@ NORMAL_VOL_RISK_MULT = 1.00
 HIGH_VOL_RISK_MULT = 0.60
 
 # TRADE MANAGEMENT (UPDATE OPTIMISASI BE & FEE)
+ENABLE_BREAK_EVEN = False   # switch ON/OFF break-even
 BE_ACTIVATION_RR = 0.6      
 BE_BUFFER_PCT = 0.0004      
 
@@ -461,6 +462,9 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
     return actual_entry, sl_q, tp_q, sl_dist
 
 def manage_break_even(st, mark_price, tick_size, qty_q):
+    if not ENABLE_BREAK_EVEN:
+        return
+
     if st.get("be_activated", False) or st.get("be_failed_once", False):
         return
 
@@ -535,7 +539,6 @@ def manage_break_even(st, mark_price, tick_size, qty_q):
                 return
 
         except Exception as be_err:
-            # coba restore SL lama jika ada
             if old_stop_price and old_stop_price > 0:
                 try:
                     restore_price_q = _round_tick(old_stop_price, tick_size)
@@ -566,7 +569,7 @@ def manage_break_even(st, mark_price, tick_size, qty_q):
         st["be_failed_once"] = True
         save_state(st)
         print(f"🚨 Error activating BE: {e}")
-
+        
 # =========================
 # MAIN LOOP
 # =========================
