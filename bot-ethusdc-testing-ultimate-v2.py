@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# bot-ethusdc-v9.7.1-ultimate.py
+# bot-ethusdc-v9.7.3-ultimate.py
 # ETHUSDC USD-M Futures - HYBRID Trend & Range
-# V9.7.1: FIX BUG Break-Even, FIX Death Loop API, & TESTNET READY + OPTIMIZED TRADE MANAGEMENT
+# V9.7.3: FINAL TESTNET READY, Adaptive Risk, Stable Emergency Close, Atomic State
 
 import os
 import time
 import json
 import csv
 import random
+import traceback
 from pathlib import Path
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
@@ -21,7 +22,7 @@ from requests.exceptions import ReadTimeout, ConnectionError
 # =========================
 # TESTNET FORCE ENTRY MODE
 # =========================
-FORCE_TEST_ENTRY = False
+FORCE_TEST_ENTRY = False  # DI-MATIKAN SESUAI PRIORITAS
 FORCE_TEST_SIDE = "BUY"
 
 # =========================
@@ -39,9 +40,16 @@ MAX_FORCED_RISK_PCT = 0.035
 MAX_DAILY_DRAWDOWN_PCT = 0.06
 MAX_MARGIN_FRACTION = 0.75
 
+# =========================
+# VOLATILITY ADAPTIVE RISK
+# =========================
+LOW_VOL_RISK_MULT = 0.85
+NORMAL_VOL_RISK_MULT = 1.00
+HIGH_VOL_RISK_MULT = 0.60
+
 # TRADE MANAGEMENT (UPDATE OPTIMISASI BE & FEE)
-BE_ACTIVATION_RR = 0.6      # Diperbesar agar posisi punya ruang bernapas
-BE_BUFFER_PCT = 0.0004      # Diperbesar agar BE selalu menutup fee
+BE_ACTIVATION_RR = 0.6      
+BE_BUFFER_PCT = 0.0004      
 
 # VOLATILITY REGIME FILTER
 VOL_ATR_LEN_15M = 14
@@ -93,7 +101,7 @@ SLEEP_SLOW = 10
 SLEEP_FAST = 3
 RECV_WINDOW = 10_000
 
-TG_PREFIX = "ETHUSDC V9.7.1 TESTNET"
+TG_PREFIX = "ETHUSDC V9.7.3 TESTNET"
 STATE_FILE = Path(".state_ethusdc_v9_testnet.json")  
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 LOOP_LOG = LOG_DIR / "loop_eth_testnet.csv"          
@@ -127,8 +135,13 @@ def save_state(state):
     try:
         st_copy = state.copy()
         if "seen_tran_ids" in st_copy: st_copy["seen_tran_ids"] = list(st_copy["seen_tran_ids"])
-        STATE_FILE.write_text(json.dumps(st_copy, indent=2, sort_keys=True))
-    except: pass
+        
+        # Atomic write
+        temp_file = STATE_FILE.with_suffix('.tmp')
+        temp_file.write_text(json.dumps(st_copy, indent=2, sort_keys=True))
+        temp_file.replace(STATE_FILE)
+    except Exception as e: 
+        print(f"Gagal save state: {e}")
 
 def log_loop(now, equity, mode, bias, active_bias, reason, dbg):
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -285,6 +298,13 @@ def get_vol_regime_15m(df15):
 
     return regime, atr_pct, low_th, high_th
 
+def get_risk_pct_by_vol_regime(vol_regime: str) -> float:
+    if vol_regime == "LOW_VOL":
+        return RISK_PCT * LOW_VOL_RISK_MULT
+    elif vol_regime == "HIGH_VOL":
+        return RISK_PCT * HIGH_VOL_RISK_MULT
+    return RISK_PCT * NORMAL_VOL_RISK_MULT
+
 def compute_entry_indicators_5m():
     df5 = klines_df(SYMBOL, TF_ENTRY, limit=120)
     df5["ema9"], df5["ema21"] = ema(df5["close"], EMA_FAST), ema(df5["close"], EMA_SLOW)
@@ -409,7 +429,25 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
     except Exception as e:
         print(f"CRITICAL ERROR: Failed Bracket. Emergency close. Error: {e}")
         try:
-            call_with_retry(client.futures_create_order, symbol=SYMBOL, side=op_side, type="MARKET", quantity=qty_q, reduceOnly=True, recvWindow=RECV_WINDOW)
+            # OPTIMASI KEMBALI: Ambil quantity posisi aktual lalu close dengan reduceOnly=True
+            current_pos_amt = 0.0
+            pos = call_with_retry(client.futures_position_information, symbol=SYMBOL, recvWindow=RECV_WINDOW)
+            for p in pos or []:
+                if p.get("symbol") == SYMBOL:
+                    current_pos_amt = abs(float(p.get("positionAmt", 0.0)))
+                    break
+            
+            if current_pos_amt > 0:
+                call_with_retry(
+                    client.futures_create_order, 
+                    symbol=SYMBOL, 
+                    side=op_side, 
+                    type="MARKET", 
+                    quantity=current_pos_amt,
+                    reduceOnly=True, 
+                    recvWindow=RECV_WINDOW
+                )
+            
             send_telegram(f"🚨 EMERGENCY: Gagal pasang SL/TP. Posisi DITUTUP OTOMATIS! Err: {e}")
             
             st_temp = load_state({})
@@ -423,61 +461,79 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
     return actual_entry, sl_q, tp_q, sl_dist
 
 def manage_break_even(st, mark_price, tick_size, qty_q):
-    if st.get("be_activated", False): return
-    
+    if st.get("be_activated", False) or st.get("be_failed_once", False):
+        return
+
     entry_price = float(st.get("entry_price", 0.0))
     sl_dist = float(st.get("sl_dist_actual", 0.0))
     side = st.get("pos_side", "")
-    
-    if entry_price <= 0 or sl_dist <= 0: return
 
-    if side == "LONG": profit_r = (mark_price - entry_price) / sl_dist
-    elif side == "SHORT": profit_r = (entry_price - mark_price) / sl_dist
-    else: return
+    if entry_price <= 0 or sl_dist <= 0:
+        return
 
-    if profit_r >= BE_ACTIVATION_RR:
-        try:
-            # 1. Cari dan simpan ID STOP_MARKET yang sedang aktif
-            open_orders = call_with_retry(client.futures_get_open_orders, symbol=SYMBOL, recvWindow=RECV_WINDOW)
-            existing_stop_orders = []
-            for o in open_orders:
-                if o["type"] == "STOP_MARKET":
-                    existing_stop_orders.append(o["orderId"])
-            
-            # Kalkulasi harga Break-Even dan sisi order
-            op_side = "SELL" if side == "LONG" else "BUY"
-            if side == "LONG": be_price = entry_price * (1 + BE_BUFFER_PCT)
-            else: be_price = entry_price * (1 - BE_BUFFER_PCT)
-            
-            be_price_q = _round_tick(be_price, tick_size)
-            
-            # 2. Buat STOP_MARKET break-even terlebih dahulu
-            new_be_order = call_with_retry(
-                client.futures_create_order, 
-                symbol=SYMBOL, 
-                side=op_side, 
-                type="STOP_MARKET", 
-                stopPrice=be_price_q, 
-                closePosition=True, 
-                workingType="MARK_PRICE", 
+    if side == "LONG":
+        profit_r = (mark_price - entry_price) / sl_dist
+    elif side == "SHORT":
+        profit_r = (entry_price - mark_price) / sl_dist
+    else:
+        return
+
+    if profit_r < BE_ACTIVATION_RR:
+        return
+
+    try:
+        open_orders = call_with_retry(
+            client.futures_get_open_orders,
+            symbol=SYMBOL,
+            recvWindow=RECV_WINDOW
+        )
+
+        stop_order_id = None
+        for o in open_orders:
+            if o.get("type") == "STOP_MARKET":
+                stop_order_id = o.get("orderId")
+                break
+
+        op_side = "SELL" if side == "LONG" else "BUY"
+        if side == "LONG":
+            be_price = entry_price * (1 + BE_BUFFER_PCT)
+        else:
+            be_price = entry_price * (1 - BE_BUFFER_PCT)
+
+        be_price_q = _round_tick(be_price, tick_size)
+
+        if stop_order_id:
+            call_with_retry(
+                client.futures_cancel_order,
+                symbol=SYMBOL,
+                orderId=stop_order_id,
                 recvWindow=RECV_WINDOW
             )
-            
-            # 3 & 4. Jika order SL BE baru berhasil dibuat, baru cancel STOP_MARKET lama
-            if new_be_order and "orderId" in new_be_order:
-                for oid in existing_stop_orders:
-                    try:
-                        call_with_retry(client.futures_cancel_order, symbol=SYMBOL, orderId=oid, recvWindow=RECV_WINDOW)
-                    except Exception as cancel_e:
-                        print(f"[!] Peringatan: Gagal membatalkan SL lama dengan ID {oid}. Error: {cancel_e}")
-            
-            # Update state & kirim notifikasi
+
+        new_be_order = call_with_retry(
+            client.futures_create_order,
+            symbol=SYMBOL,
+            side=op_side,
+            type="STOP_MARKET",
+            stopPrice=be_price_q,
+            closePosition=True,
+            workingType="MARK_PRICE",
+            recvWindow=RECV_WINDOW
+        )
+
+        if new_be_order and "orderId" in new_be_order:
             st["be_activated"] = True
             save_state(st)
-            send_telegram(f"🛡️ ETH Break-Even Activated!\nProfit capai {BE_ACTIVATION_RR}R.\nSL aman di titik impas: {be_price_q}")
-            
-        except Exception as e:
-            print(f"Error activating BE: {e}")
+            send_telegram(
+                f"🛡️ ETH Break-Even Activated!\n"
+                f"Profit capai {BE_ACTIVATION_RR}R.\n"
+                f"SL aman di titik impas: {be_price_q}"
+            )
+
+    except Exception as e:
+        print(f"🚨 Error activating BE: {e}. Mencegah percobaan BE ulang untuk posisi ini.")
+        st["be_failed_once"] = True
+        save_state(st)
 
 # =========================
 # MAIN LOOP
@@ -500,7 +556,7 @@ def main():
         "mode": "RANGE", "prev_in_position": False,
         "last_pnl_check_ms": int(time.time() * 1000) - 60_000,
         "seen_tran_ids": set(),
-        "entry_price": 0.0, "sl_dist_actual": 0.0, "pos_side": "", "be_activated": False, "qty_q": 0.0,
+        "entry_price": 0.0, "sl_dist_actual": 0.0, "pos_side": "", "be_activated": False, "be_failed_once": False, "qty_q": 0.0,
         "force_test_done": False
     })
 
@@ -519,6 +575,7 @@ def main():
                 send_telegram(f"🗓 ETH Day reset. Start equity: ${st['start_equity_today']:.2f}")
                 save_state(st)
 
+            # MENGEMBALIKAN KE CALL TERPISAH
             equity_now = get_wallet_balance_usdc()
             pos_amt = get_position_amt()
             in_pos = abs(pos_amt) > 0
@@ -529,7 +586,7 @@ def main():
                 st["daily_realized_pnl"] = float(st.get("daily_realized_pnl", 0.0)) + pnl
                 st["loss_streak"] = int(st.get("loss_streak", 0)) + 1 if pnl < 0 else 0
                 
-                st.update({"entry_price": 0.0, "sl_dist_actual": 0.0, "pos_side": "", "be_activated": False, "qty_q": 0.0})
+                st.update({"entry_price": 0.0, "sl_dist_actual": 0.0, "pos_side": "", "be_activated": False, "be_failed_once": False, "qty_q": 0.0})
 
                 send_telegram(f"✅ ETH Trade Closed | PnL: ${pnl:.4f} | Streak: {st['loss_streak']}")
                 if st["loss_streak"] >= LOSS_STREAK_LIMIT:
@@ -582,7 +639,6 @@ def main():
             
             df5 = compute_entry_indicators_5m()
             
-            # --- FIX 1: Guard last_closed ---
             if df5 is None or len(df5) < 3:
                 time.sleep(SLEEP_SLOW)
                 continue
@@ -590,7 +646,6 @@ def main():
             last_closed = _last_closed(df5)
             price = float(last_closed["close"])
 
-            # --- FIX 2 & 3: FORCE TEST ENTRY MODE ---
             if FORCE_TEST_ENTRY:
                 if st.get("force_test_done", False):
                     time.sleep(SLEEP_SLOW)
@@ -614,7 +669,8 @@ def main():
                         "pos_side": "LONG" if FORCE_TEST_SIDE == "BUY" else "SHORT",
                         "qty_q": qty_q,
                         "be_activated": False,
-                        "force_test_done": True # Kunci agar tidak buka posisi lagi
+                        "be_failed_once": False,
+                        "force_test_done": True
                     })
                     save_state(st)
                     
@@ -624,9 +680,7 @@ def main():
                 
                 time.sleep(SLEEP_SLOW)
                 continue
-            # --- AKHIR LOGIKA FORCE TEST ---
 
-            # --- LOGIKA NORMAL BOT ---
             active_bias = "NONE"
             if st["mode"] == "TREND": side, reason, active_bias = signal_trend_mode(df5, bias, float(adx15))
             else: side, reason, active_bias = signal_range_mode(df5)
@@ -660,7 +714,9 @@ def main():
             
             sl_dist_est = sl_mult * max(price * sl_min_pct, min(raw_sl_dist, price * sl_max_pct))
 
-            risk_usd = equity_now * RISK_PCT
+            risk_pct_used = get_risk_pct_by_vol_regime(vol_regime)
+            risk_usd = equity_now * risk_pct_used
+            
             qty = (risk_usd / sl_dist_est) if sl_dist_est > 0 else 0.0
             step_size = float(_get_symbol_filters(SYMBOL)["LOT_SIZE"]["stepSize"])
             qty_q = _quantize_step(qty, step_size)
@@ -676,7 +732,6 @@ def main():
 
             if (notional_q / LEVERAGE) > (equity_now * MAX_MARGIN_FRACTION): time.sleep(SLEEP_SLOW); continue
             
-            # UPDATE FILTER FEE: diubah menjadi 3.0
             est_fee = (notional_q * TAKER_FEE_PCT) * 2.0
             rr = (TREND_RR if st["mode"] == "TREND" else RANGE_RR) * tp_mult
             
@@ -692,16 +747,29 @@ def main():
                     "sl_dist_actual": sl_dist_actual,
                     "pos_side": "LONG" if side == "BUY" else "SHORT",
                     "qty_q": qty_q,
-                    "be_activated": False
+                    "be_activated": False,
+                    "be_failed_once": False
                 })
                 save_state(st)
 
-                send_telegram(f"🚀 ENTRY {SYMBOL} {side}\nMode: {st['mode']} ({vol_regime})\nQty: {qty_q}\nEntry: {actual_price:.2f}\nSL: {sl_final} | TP: {tp_final}\nRisk~ ${(qty_q * sl_dist_actual):.2f}\nReason: {reason}")
+                send_telegram(
+                    f"🚀 ENTRY {SYMBOL} {side}\n"
+                    f"Mode: {st['mode']} ({vol_regime})\n"
+                    f"Risk: {risk_pct_used*100:.2f}%\n"
+                    f"Qty: {qty_q}\n"
+                    f"Entry: {actual_price:.2f}\n"
+                    f"SL: {sl_final} | TP: {tp_final}\n"
+                    f"Risk~ ${(qty_q * sl_dist_actual):.2f}\n"
+                    f"Reason: {reason}"
+                )
 
             time.sleep(SLEEP_SLOW)
 
         except Exception as e:
             msg = str(e)
+            print(f"Loop Error: {msg}")
+            traceback.print_exc() 
+            
             if ("Timestamp for this request" in msg) or ("recvWindow" in msg) or ("-1021" in msg):
                 sync_time_offset()
                 last_time_sync = time.time()
