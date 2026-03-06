@@ -444,7 +444,11 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
         )
 
         time.sleep(SLEEP_SLOW)
-        continue
+        send_telegram(
+            f"🧪 FORCE ENTRY {SYMBOL} {side}"
+        )
+
+        time.sleep(SLEEP_SLOW)
                 
     except Exception as e:
         print(f"CRITICAL ERROR: Failed Bracket. Emergency close. Error: {e}")
