@@ -590,12 +590,9 @@ def main():
             log_loop(now, equity_now, st["mode"], bias, active_bias, reason, dbg)
 
             if side is None:
-                is_near = False
-                try:
-                    if st["mode"] == "TREND": is_near = (abs(price - float(last_closed["ema21"])) / max(price, 1e-9) < 0.002)
-                except: pass
-                time.sleep(SLEEP_FAST if is_near else SLEEP_SLOW)
-                continue
+                side = "BUY"
+                reason = "FORCE_TEST_ENTRY"
+                active_bias = "LONG"
 
             sl_mult = 1.0
             tp_mult = 1.0

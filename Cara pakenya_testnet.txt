@@ -20,6 +20,7 @@ INI VPS
 	ketik "cd (foldernya)"
 	"ls"
 	"cd binance-bot"
+	source venv/bin/activate
 	"git pull origin main" (update perubahan dari cmd lokal) kalau perubahan dari file bot.py update pm2nya juga
 	"pm2 restart" perubahan kalau file botnya berubah
 	
