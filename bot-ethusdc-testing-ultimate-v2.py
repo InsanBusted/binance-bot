@@ -216,16 +216,51 @@ def get_unrealized_pnl():
 
 def realized_pnl_since(start_ms, seen_tran_ids):
     try:
-        incomes = call_with_retry(client.futures_income_history, symbol=SYMBOL, incomeType="REALIZED_PNL", startTime=start_ms, limit=1000, recvWindow=RECV_WINDOW)
+        incomes = call_with_retry(
+            client.futures_income_history,
+            symbol=SYMBOL,
+            startTime=start_ms,
+            limit=1000,
+            recvWindow=RECV_WINDOW
+        )
+
         total = 0.0
+        new_seen = []
+
         for it in incomes or []:
             tid = it.get("tranId")
-            if tid and tid not in seen_tran_ids:
-                total += float(it.get("income", 0.0))
-                seen_tran_ids.add(tid)
-        return total
-    except: return 0.0
+            income_type = it.get("incomeType")
 
+            if not tid or tid in seen_tran_ids:
+                continue
+
+            if income_type in ("REALIZED_PNL", "COMMISSION"):
+                total += float(it.get("income", 0.0))
+                new_seen.append(tid)
+
+        for tid in new_seen:
+            seen_tran_ids.add(tid)
+
+        return total, len(new_seen) > 0
+
+    except:
+        return 0.0, False
+
+def get_closed_trade_pnl_with_retry(start_ms, seen_tran_ids, retries=5, wait_sec=2):
+    total_pnl = 0.0
+    got_any = False
+
+    for i in range(retries):
+        pnl, found = realized_pnl_since(start_ms, seen_tran_ids)
+        if found:
+            total_pnl += pnl
+            got_any = True
+            break
+
+        time.sleep(wait_sec)
+
+    return total_pnl, got_any
+    
 def cancel_all_open_orders():
     try: call_with_retry(client.futures_cancel_all_open_orders, symbol=SYMBOL, recvWindow=RECV_WINDOW)
     except: pass
@@ -586,10 +621,11 @@ def main():
         "day_key": datetime.now(timezone.utc).date().isoformat(),
         "start_equity_today": get_wallet_balance_usdc(),
         "daily_realized_pnl": 0.0,
-        "trades_today": 0, "loss_streak": 0, 
+        "trades_today": 0, "loss_streak": 0,
         "daily_locked": False, "cooldown_until": None,
         "mode": "RANGE", "prev_in_position": False,
         "last_pnl_check_ms": int(time.time() * 1000) - 60_000,
+        "position_open_ms": 0,
         "seen_tran_ids": set(),
         "entry_price": 0.0, "sl_dist_actual": 0.0, "pos_side": "", "be_activated": False, "be_failed_once": False, "qty_q": 0.0,
         "force_test_done": False
@@ -614,22 +650,51 @@ def main():
             equity_now = get_wallet_balance_usdc()
             pos_amt = get_position_amt()
             in_pos = abs(pos_amt) > 0
+            
+            if in_pos and not st.get("prev_in_position"):
+                st["prev_in_position"] = True
+                if not st.get("position_open_ms"):
+                    st["position_open_ms"] = int(time.time() * 1000)
+                save_state(st)
 
             if st.get("prev_in_position") and not in_pos:
-                pnl = realized_pnl_since(int(st.get("last_pnl_check_ms", 0)), st["seen_tran_ids"])
+                pnl_start_ms = int(st.get("position_open_ms", 0)) or int(st.get("last_pnl_check_ms", 0))
+
+                pnl, got_any = get_closed_trade_pnl_with_retry(
+                    pnl_start_ms,
+                    st["seen_tran_ids"],
+                    retries=5,
+                    wait_sec=2
+                )
+
+                if not got_any:
+                    send_telegram("⚠️ ETH posisi tertutup, tapi data PnL Binance belum terbaca. Bot akan cek lagi di loop berikutnya.")
+                    save_state(st)
+                    time.sleep(SLEEP_SLOW)
+                    continue
+
                 st["last_pnl_check_ms"] = int(time.time() * 1000)
                 st["daily_realized_pnl"] = float(st.get("daily_realized_pnl", 0.0)) + pnl
                 st["loss_streak"] = int(st.get("loss_streak", 0)) + 1 if pnl < 0 else 0
-                
-                st.update({"entry_price": 0.0, "sl_dist_actual": 0.0, "pos_side": "", "be_activated": False, "be_failed_once": False, "qty_q": 0.0})
+
+                st.update({
+                    "entry_price": 0.0,
+                    "sl_dist_actual": 0.0,
+                    "pos_side": "",
+                    "be_activated": False,
+                    "be_failed_once": False,
+                    "qty_q": 0.0,
+                    "position_open_ms": 0
+                })
 
                 send_telegram(f"✅ ETH Trade Closed | PnL: ${pnl:.4f} | Streak: {st['loss_streak']}")
+
                 if st["loss_streak"] >= LOSS_STREAK_LIMIT:
                     st["daily_locked"] = True
                     send_telegram("🧯 ETH LOSS STREAK LIMIT! Locked until tomorrow.")
                 else:
                     st["cooldown_until"] = _dt_to_iso(now + pd.Timedelta(minutes=COOLDOWN_MINUTES))
-                
+
                 st["prev_in_position"] = False
                 save_state(st)
                 time.sleep(SLEEP_SLOW)
@@ -705,6 +770,7 @@ def main():
                         "qty_q": qty_q,
                         "be_activated": False,
                         "be_failed_once": False,
+                        "position_open_ms": int(time.time() * 1000),
                         "force_test_done": True
                     })
                     save_state(st)
@@ -783,7 +849,8 @@ def main():
                     "pos_side": "LONG" if side == "BUY" else "SHORT",
                     "qty_q": qty_q,
                     "be_activated": False,
-                    "be_failed_once": False
+                    "be_failed_once": False,
+                    "position_open_ms": int(time.time() * 1000)
                 })
                 save_state(st)
 
