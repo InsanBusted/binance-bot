@@ -58,8 +58,8 @@ FUTURES_TESTNET_URL = "https://testnet.binancefuture.com"
 # SETUP CLIENT
 # ======================
 load_dotenv()
-API_KEY = os.getenv("BINANCE_API_KEY")
-API_SECRET = os.getenv("BINANCE_API_SECRET")
+API_KEY = os.getenv("BINANCE_TESTNET_API_KEY")
+API_SECRET = os.getenv("BINANCE_TESTNET_API_SECRET")
 
 if not API_KEY or not API_SECRET:
     raise SystemExit("API key/secret belum kebaca. Pastikan file .env sudah benar.")
