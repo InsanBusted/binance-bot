@@ -252,14 +252,14 @@ if USE_TESTNET:
     API_KEY = (os.getenv("BINANCE_TESTNET_API_KEY") or "").strip()
     API_SECRET = (os.getenv("BINANCE_TESTNET_API_SECRET") or "").strip()
 else:
-    API_KEY = (os.getenv("BINANCE_TESTNET_API_KEY") or "").strip()
-    API_SECRET = (os.getenv("BINANCE_TESTNET_API_SECRET") or "").strip()
+    API_KEY = (os.getenv("BINANCE_API_KEY") or "").strip()
+    API_SECRET = (os.getenv("BINANCE_API_SECRET") or "").strip()
 
 TG_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
 TG_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
 
 if not API_KEY or not API_SECRET:
-    key_name = "BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET" if USE_TESTNET else "BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET"
+    key_name = "BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET" if USE_TESTNET else "BINANCE_API_KEY / BINANCE_API_SECRET"
     raise SystemExit(f"Missing {key_name} in .env")
 
 client = Client(API_KEY, API_SECRET, testnet=USE_TESTNET)
@@ -569,10 +569,13 @@ def signal_trend_mode(df5: pd.DataFrame, bias: str) -> Tuple[bool, Optional[str]
 
     if ema_fast_v >= ema_slow_v:
         return False, None, {"reason": "ema_not_aligned_short", **dbg}
+        
     if rsiv > RSI_TREND_SHORT_MAX:
         return False, None, {"reason": "rsi_high_trend_short", **dbg}
+        
     if not pullback_touch_short:
         return False, None, {"reason": "no_pullback_touch", **dbg}
+        
     if (not candle_bear) or (float(last["close"]) > ema_fast_v):
         dbg["touch"] = True
         return False, None, {"reason": "no_bear_confirm", **dbg}
@@ -617,6 +620,7 @@ def signal_range_mode(df5: pd.DataFrame) -> Tuple[bool, Optional[str], dict]:
     if touch_low and not rej_long:
         dbg.update({"touch": True})
         return False, None, {"reason": "range_touch_low_no_reject", **dbg}
+        
     if touch_high and not rej_short:
         dbg.update({"touch": True})
         return False, None, {"reason": "range_touch_high_no_reject", **dbg}
@@ -659,6 +663,65 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
     tick = float(filters["PRICE_FILTER"]["tickSize"])
     step = float(filters["LOT_SIZE"]["stepSize"])
 
+    def _has_valid_order_ref(resp):
+        return bool(resp) and (("orderId" in resp) or ("algoId" in resp))
+
+    def _safe_get_mark_price(fallback_price: float) -> float:
+        try:
+            mp = call_with_retry(
+                client.futures_mark_price,
+                symbol=SYMBOL,
+                recvWindow=RECV_WINDOW
+            )
+            return float(mp.get("markPrice", fallback_price))
+        except Exception as e:
+            print("WARN get fresh mark price failed:", e)
+            return float(fallback_price)
+
+    def _sanitize_bracket_prices(side_: str, sl_raw: float, tp_raw: float, current_mark: float):
+        """
+        Cegah STOP/TP langsung trigger saat pakai workingType=MARK_PRICE.
+        BUY  = posisi long  -> SL harus di bawah mark, TP harus di atas mark
+        SELL = posisi short -> SL harus di atas mark, TP harus di bawah mark
+        """
+        min_gap_ticks = 3
+        gap = tick * min_gap_ticks
+
+        sl_adj = _round_tick(sl_raw, tick)
+        tp_adj = _round_tick(tp_raw, tick)
+
+        if side_ == "BUY":
+            # Long
+            max_sl = _round_tick(current_mark - gap, tick)
+            min_tp = _round_tick(current_mark + gap, tick)
+
+            if sl_adj >= current_mark:
+                sl_adj = max_sl
+            if tp_adj <= current_mark:
+                tp_adj = min_tp
+
+            # jaga agar SL tetap di bawah TP
+            if sl_adj >= tp_adj:
+                sl_adj = _round_tick(current_mark - (gap * 2), tick)
+                tp_adj = _round_tick(current_mark + (gap * 2), tick)
+
+        else:
+            # Short
+            min_sl = _round_tick(current_mark + gap, tick)
+            max_tp = _round_tick(current_mark - gap, tick)
+
+            if sl_adj <= current_mark:
+                sl_adj = min_sl
+            if tp_adj >= current_mark:
+                tp_adj = max_tp
+
+            # jaga agar TP tetap di bawah SL
+            if tp_adj >= sl_adj:
+                sl_adj = _round_tick(current_mark + (gap * 2), tick)
+                tp_adj = _round_tick(current_mark - (gap * 2), tick)
+
+        return sl_adj, tp_adj
+
     cancel_all_open_orders()
 
     entry_resp = call_with_retry(
@@ -688,8 +751,8 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
                         actual_pos_amt = abs(pos_amt)
                         actual_entry = float(p.get("entryPrice", 0.0))
                         break
-        except Exception:
-            pass
+        except Exception as e:
+            print("WARN read position after entry:", e)
 
         if actual_entry > 0 and actual_pos_amt > 0:
             break
@@ -712,9 +775,18 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
         tp_price = actual_entry - (sl_dist * rr)
         op_side = "BUY"
 
-    sl_q = _round_tick(sl_price, tick)
-    tp_q = _round_tick(tp_price, tick)
+    current_mark = _safe_get_mark_price(actual_entry)
+    sl_q, tp_q = _sanitize_bracket_prices(side, sl_price, tp_price, current_mark)
     actual_pos_amt_q = _quantize_step(actual_pos_amt, step)
+
+    if actual_pos_amt_q <= 0:
+        raise RuntimeError(f"Qty final tidak valid: {actual_pos_amt_q}")
+
+    print(
+        f"BRACKET DEBUG | side={side} | entry={actual_entry:.8f} | mark={current_mark:.8f} | "
+        f"sl_raw={sl_price:.8f} | tp_raw={tp_price:.8f} | sl={sl_q:.8f} | tp={tp_q:.8f} | "
+        f"qty={actual_pos_amt_q}"
+    )
 
     try:
         sl_resp = call_with_retry(
@@ -743,10 +815,10 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
             recvWindow=RECV_WINDOW
         )
 
-        if not sl_resp or "orderId" not in sl_resp:
-            raise RuntimeError(f"SL order gagal / orderId tidak ada | resp={sl_resp}")
-        if not tp_resp or "orderId" not in tp_resp:
-            raise RuntimeError(f"TP order gagal / orderId tidak ada | resp={tp_resp}")
+        if not _has_valid_order_ref(sl_resp):
+            raise RuntimeError(f"SL order gagal / id tidak ada | resp={sl_resp}")
+        if not _has_valid_order_ref(tp_resp):
+            raise RuntimeError(f"TP order gagal / id tidak ada | resp={tp_resp}")
 
     except Exception as e:
         print(f"CRITICAL ERROR: Failed Bracket. Emergency close. Error: {e}")
@@ -758,7 +830,11 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
 
         try:
             current_pos_amt = 0.0
-            pos = call_with_retry(client.futures_position_information, symbol=SYMBOL, recvWindow=RECV_WINDOW)
+            pos = call_with_retry(
+                client.futures_position_information,
+                symbol=SYMBOL,
+                recvWindow=RECV_WINDOW
+            )
             for p in pos or []:
                 if p.get("symbol") == SYMBOL:
                     current_pos_amt = float(p.get("positionAmt", 0.0))
@@ -768,29 +844,35 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
                 emergency_side = "SELL" if current_pos_amt > 0 else "BUY"
                 qty_close = _quantize_step(abs(current_pos_amt), step)
 
-                call_with_retry(
-                    client.futures_create_order,
-                    symbol=SYMBOL,
-                    side=emergency_side,
-                    type="MARKET",
-                    quantity=qty_close,
-                    reduceOnly=True,
-                    recvWindow=RECV_WINDOW
-                )
+                if qty_close > 0:
+                    call_with_retry(
+                        client.futures_create_order,
+                        symbol=SYMBOL,
+                        side=emergency_side,
+                        type="MARKET",
+                        quantity=qty_close,
+                        reduceOnly=True,
+                        recvWindow=RECV_WINDOW
+                    )
+
                 send_telegram(
                     f"🚨 EMERGENCY: Gagal pasang SL/TP. Posisi DITUTUP OTOMATIS!\n"
-                    f"Err: {e}\nentryId={entry_resp.get('orderId')}"
+                    f"Err: {e}\n"
+                    f"entryId={entry_resp.get('orderId')}\n"
+                    f"mark={round(current_mark, 8)} | sl={round(sl_q, 8)} | tp={round(tp_q, 8)}"
                 )
             else:
                 send_telegram(
                     f"⚠️ Bracket gagal, tapi posisi sudah tidak ada.\n"
-                    f"Err: {e}\nentryId={entry_resp.get('orderId')}"
+                    f"Err: {e}\n"
+                    f"entryId={entry_resp.get('orderId')}"
                 )
 
         except Exception as close_err:
             send_telegram(
                 f"🛑 FATAL: Bracket gagal dan emergency close gagal!\n"
-                f"BracketErr: {repr(e)}\nCloseErr: {repr(close_err)}"
+                f"BracketErr: {repr(e)}\n"
+                f"CloseErr: {repr(close_err)}"
             )
             raise RuntimeError(f"Bracket & Close fail | e={e} | c={close_err}")
 
