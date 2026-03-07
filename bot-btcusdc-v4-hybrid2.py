@@ -252,14 +252,14 @@ if USE_TESTNET:
     API_KEY = (os.getenv("BINANCE_TESTNET_API_KEY") or "").strip()
     API_SECRET = (os.getenv("BINANCE_TESTNET_API_SECRET") or "").strip()
 else:
-    API_KEY = (os.getenv("BINANCE_API_KEY") or "").strip()
-    API_SECRET = (os.getenv("BINANCE_API_SECRET") or "").strip()
+    API_KEY = (os.getenv("BINANCE_TESTNET_API_KEY") or "").strip()
+    API_SECRET = (os.getenv("BINANCE_TESTNET_API_SECRET") or "").strip()
 
 TG_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
 TG_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
 
 if not API_KEY or not API_SECRET:
-    key_name = "BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET" if USE_TESTNET else "BINANCE_API_KEY / BINANCE_API_SECRET"
+    key_name = "BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET" if USE_TESTNET else "BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET"
     raise SystemExit(f"Missing {key_name} in .env")
 
 client = Client(API_KEY, API_SECRET, testnet=USE_TESTNET)
