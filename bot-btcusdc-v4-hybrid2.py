@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # bot-btcusdc-v4-hybrid.py
-# BTCUSDC USD-M Futures (REAL) - HYBRID Trend scalping + Range sniper
+# # BTCUSDC USD-M Futures - HYBRID Trend scalping + Range sniper
 # - Regime detection ADX on 15m with hysteresis (TREND vs RANGE)
 # - TREND mode EMA200 15m bias + EMA9/21 pullback on 5m + RSI confirm
 # - RANGE mode Donchian(20) 5m touch + rejection back inside range, TP small
@@ -41,7 +41,11 @@ def call_with_retry(fn, *args, retries: int = 5, base_sleep: float = 1.0, **kwar
 # =========================
 # CONFIG
 # =========================
-SYMBOL = "BTCUSDC"
+PAIR = "SOLUSDT"
+BASE_ASSET = PAIR[:-4]
+QUOTE_ASSET = PAIR[-4:]
+
+SYMBOL = PAIR
 LEVERAGE = 15
 
 USE_TESTNET = True
@@ -96,9 +100,10 @@ SLEEP_SECONDS = 10
 RECV_WINDOW = 10_000
 ORDER_TYPE_ENTRY = "MARKET"
 
-TG_PREFIX = "BTCUSDC V4 HYBRID"
+TG_PREFIX = f"{PAIR} V4 HYBRID {'TESTNET' if USE_TESTNET else 'REAL'}"
 
-STATE_FILE = Path(".state_btcusdc_v4_hybrid.json")
+state_mode = "testnet" if USE_TESTNET else "real"
+STATE_FILE = Path(f".state_{PAIR.lower()}_v4_hybrid_{state_mode}.json")
 
 
 # =========================
@@ -230,13 +235,19 @@ def save_state(state: dict) -> None:
 # =========================
 load_dotenv(dotenv_path=".env")
 
-API_KEY = (os.getenv("BINANCE_TESTNET_API_KEY") or "").strip()
-API_SECRET = (os.getenv("BINANCE_API_SECRET") or "").strip()
+if USE_TESTNET:
+    API_KEY = (os.getenv("BINANCE_TESTNET_API_KEY") or "").strip()
+    API_SECRET = (os.getenv("BINANCE_TESTNET_API_SECRET") or "").strip()
+else:
+    API_KEY = (os.getenv("BINANCE_API_KEY") or "").strip()
+    API_SECRET = (os.getenv("BINANCE_API_SECRET") or "").strip()
+
 TG_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
 TG_CHAT_ID = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
 
 if not API_KEY or not API_SECRET:
-    raise SystemExit("Missing BINANCE_TESTNET_API_KEY / BINANCE_API_SECRET in .env")
+    key_name = "BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_API_SECRET" if USE_TESTNET else "BINANCE_API_KEY / BINANCE_API_SECRET"
+    raise SystemExit(f"Missing {key_name} in .env")
 
 client = Client(API_KEY, API_SECRET, testnet=USE_TESTNET)
 client.REQUEST_TIMEOUT = 60
@@ -330,17 +341,17 @@ def set_leverage_safe(symbol: str, lev: int):
     except Exception as e:
         print("WARN set_leverage:", e)
 
-def get_wallet_balance_usdc() -> float:
+def get_wallet_balance_quote() -> float:
     try:
         bal = call_with_retry(client.futures_account_balance, recvWindow=RECV_WINDOW)
         for b in bal:
-            if b.get("asset") == "USDC":
+            if b.get("asset") == QUOTE_ASSET:
                 return float(b.get("balance", 0.0))
         return 0.0
     except Exception as e:
         print("WARN get_wallet_balance:", e)
         return 0.0
-
+    
 def get_position_amt() -> float:
     try:
         pos = call_with_retry(client.futures_position_information, symbol=SYMBOL, recvWindow=RECV_WINDOW)
@@ -837,7 +848,8 @@ def main():
     min_notional = get_min_notional(SYMBOL, fallback=100.0)
 
     print("MinNotional:", min_notional)
-    print(f"{SYMBOL} V4 HYBRID START (REAL) | Lev:{LEVERAGE} | Regime:{TF_REGIME} ADX{ADX_LEN} | Entry:{TF_ENTRY}")
+    mode_label = "TESTNET" if USE_TESTNET else "REAL"
+    print(f"{SYMBOL} V4 HYBRID START ({mode_label}) | Lev:{LEVERAGE} | Regime:{TF_REGIME} ADX{ADX_LEN} | Entry:{TF_ENTRY}")
 
     send_telegram_throttled(
         "startup",
@@ -859,7 +871,7 @@ def main():
         "loss_streak": 0,
         "daily_locked": False,
         "cooldown_until": None,
-        "start_equity_today": get_wallet_balance_usdc(),
+        "start_equity_today": get_wallet_balance_quote(),
         "prev_in_position": has_open_position(),
         "last_pnl_check_ms": int(time.time() * 1000) - 60_000,
         "daily_realized_pnl": 0.0,
@@ -917,14 +929,14 @@ def main():
                 loss_streak = 0
                 daily_locked = False
                 cooldown_until = None
-                start_equity_today = get_wallet_balance_usdc()
+                start_equity_today = get_wallet_balance_quote()
                 last_pnl_check_ms = int(time.time() * 1000) - 60_000
                 daily_realized_pnl = 0.0
                 mode = "RANGE"
 
                 send_telegram_throttled(
                     "new_day",
-                    f"🗓 New day {SYMBOL}\nStart equity: {round(start_equity_today,2)} USDC\nLocks reset.",
+                    f"🗓 New day {SYMBOL}\nStart equity: {round(start_equity_today,2)} {QUOTE_ASSET}USDC\nLocks reset.",
                     min_seconds=5,
                 )
                 _save_state()
@@ -933,7 +945,7 @@ def main():
                 time.sleep(SLEEP_SECONDS)
                 continue
 
-            equity_now = get_wallet_balance_usdc()
+            equity_now = get_wallet_balance_quote()
             in_pos = has_open_position()
 
             if start_equity_today <= 0:
@@ -948,7 +960,7 @@ def main():
                 daily_locked = True
                 send_telegram_throttled(
                     "daily_hard_stop",
-                    f"🛑 DAILY HARD STOP {SYMBOL}\nDD: {round(daily_dd*100,2)}%\nTotalPnLToday: {round(total_daily_pnl,2)} USDC\nLocked until tomorrow.",
+                    f"🛑 DAILY HARD STOP {SYMBOL}\nDD: {round(daily_dd*100,2)}%\nTotalPnLToday: {round(total_daily_pnl,2)} {QUOTE_ASSET}\nLocked until tomorrow.",
                     min_seconds=30,
                 )
                 _save_state()
@@ -993,7 +1005,7 @@ def main():
                     loss_streak = 0
 
                 send_telegram(
-                    f"✅ Position closed {SYMBOL}\nRealizedPnL~: {round(pnl,4)} USDC\nLossStreak: {loss_streak}\nCooldown: {COOLDOWN_MINUTES}m"
+                    f"✅ Position closed {SYMBOL}\nRealizedPnL~: {round(pnl,4)} {QUOTE_ASSET}\nLossStreak: {loss_streak}\nCooldown: {COOLDOWN_MINUTES}m"
                 )
 
                 if loss_streak >= LOSS_STREAK_LIMIT:
@@ -1066,7 +1078,7 @@ def main():
                 send_telegram_throttled(
                     "min_notional_skip",
                     f"⚠️ Skip entry (minNotional)\n"
-                    f"Need >= {min_notional} USDC\n"
+                    f"Need >= {min_notional} {QUOTE_ASSET}\n"
                     f"After quantize: qty={qty_q} notional~{round(notional_q,2)}\n"
                     f"Eq: {round(equity_now,2)} | Risk~: {round(risk_usd,2)} | SLdist: {round(sl_dist,2)}",
                     min_seconds=120,
@@ -1084,7 +1096,7 @@ def main():
                 f"Mode: {mode} | Bias: {bias}\n"
                 f"Qty: {qty_final}\nMark: {round(price,2)}\n"
                 f"SL: {round(sl_final,2)} | TP: {round(tp_final,2)}\n"
-                f"Risk~: {round(risk_usd,2)} USDC | Notional~: {round(notional_q,2)}\n"
+                f"Risk~: {round(risk_usd,2)} {QUOTE_ASSET} | Notional~: {round(notional_q,2)}\n"
                 f"ADX15: {round(float(dbg.get('adx15',0.0)),2)} | RSI5: {round(float(dbg.get('rsi5',0.0)),2)} | ATR5: {round(float(dbg.get('atr5',0.0)),2)}\n"
                 f"TradesToday: {trades_today}"
             )
