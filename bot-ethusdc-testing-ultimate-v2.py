@@ -22,7 +22,7 @@ from requests.exceptions import ReadTimeout, ConnectionError
 # =========================
 # TESTNET FORCE ENTRY MODE
 # =========================
-FORCE_TEST_ENTRY = False  # DI-MATIKAN SESUAI PRIORITAS
+FORCE_TEST_ENTRY = True  # DI-MATIKAN SESUAI PRIORITAS
 FORCE_TEST_SIDE = "BUY"
 
 # =========================
