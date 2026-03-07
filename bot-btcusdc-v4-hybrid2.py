@@ -44,7 +44,7 @@ def call_with_retry(fn, *args, retries: int = 5, base_sleep: float = 1.0, **kwar
 # =========================
 # CONFIG
 # =========================
-PAIR = "HYPEUSDT"
+PAIR = "DOGEUSDT"
 BASE_ASSET = PAIR[:-4]
 QUOTE_ASSET = PAIR[-4:]
 
