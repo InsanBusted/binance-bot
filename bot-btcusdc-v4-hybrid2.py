@@ -845,6 +845,9 @@ def main():
     set_leverage_safe(SYMBOL, LEVERAGE)
 
     min_notional = get_min_notional(SYMBOL, fallback=100.0)
+    
+    # --- TAMBAHAN KODE: Ambil equity di awal ---
+    current_equity = get_wallet_balance_quote()
 
     print("MinNotional:", min_notional)
     mode_label = "TESTNET" if USE_TESTNET else "REAL"
@@ -854,6 +857,7 @@ def main():
         "startup",
         f"🟢 {TG_PREFIX} started\n"
         f"Symbol: {SYMBOL}\nLev: {LEVERAGE}\n"
+        f"Equity: {round(current_equity, 2)} {QUOTE_ASSET}\n"  # --- TAMBAHAN KODE: Tampilkan Equity ---
         f"Mode switch: TREND if ADX15>={ADX_TREND_ON}, RANGE if ADX15<={ADX_RANGE_ON}\n"
         f"Trend bias: EMA{EMA_TREND_LEN} {TF_REGIME} (deadband {TREND_DEADBAND_PCT*100:.2f}%)\n"
         f"TREND entry: EMA{EMA_FAST}/EMA{EMA_SLOW} {TF_ENTRY} + RSI (long>={RSI_TREND_LONG_MIN}, short<={RSI_TREND_SHORT_MAX})\n"
@@ -870,7 +874,7 @@ def main():
         "loss_streak": 0,
         "daily_locked": False,
         "cooldown_until": None,
-        "start_equity_today": get_wallet_balance_quote(),
+        "start_equity_today": current_equity,  # --- UBAH INI: Gunakan variabel yang sudah diambil di atas ---
         "prev_in_position": has_open_position(),
         "last_pnl_check_ms": int(time.time() * 1000) - 60_000,
         "daily_realized_pnl": 0.0,
