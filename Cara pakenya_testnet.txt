@@ -40,3 +40,4 @@ Buat baru pm2
 	"pm2 save"
 	"pm2 logs bot-eth-pullback" buat pastiin
 	"pm2 list" buat cek servis apa aja yang nyala
+	tail -f logs/loop_ethusdc_testnet.csv (buat mantau realtime bot jalan apa nggak)
