@@ -29,7 +29,7 @@ FORCE_TEST_SIDE = "BUY"
 # CONFIGURASI BOT & MODAL
 # =========================
 SYMBOL = "BTCUSDT"           
-LEVERAGE = 10
+LEVERAGE = 25              # Naikkan leverage untuk memperbesar notional size
 TF_REGIME = "15m"
 TF_ENTRY = "5m"
 TAKER_FEE_PCT = 0.0005
@@ -43,19 +43,19 @@ QUOTE_ASSET = get_quote_asset(SYMBOL)
 SYMBOL_TAG = SYMBOL.lower()
 
 # Parameter Aggressive Small Account
-RISK_PCT = 0.012
-MAX_FORCED_RISK_PCT = 0.045
-MAX_DAILY_DRAWDOWN_PCT = 0.08
-MAX_MARGIN_FRACTION = 0.85
+RISK_PCT = 0.05            # Resiko dinaikkan jadi 5% dari equity per trade (Sangat agresif!)
+MAX_FORCED_RISK_PCT = 0.15 # Max resiko dinaikkan agar bot tetap hajar saat volatilitas tinggi
+MAX_DAILY_DRAWDOWN_PCT = 0.40 # Toleransi minus harian sampai 40% sebelum bot berhenti
+MAX_MARGIN_FRACTION = 0.95 # Pakai margin nyaris maksimal
 
 # VOLATILITY ADAPTIVE RISK
 LOW_VOL_RISK_MULT = 1.00
-NORMAL_VOL_RISK_MULT = 1.15
-HIGH_VOL_RISK_MULT = 0.85
+NORMAL_VOL_RISK_MULT = 1.25
+HIGH_VOL_RISK_MULT = 0.90  # Tetap agak rem sedikit di high vol agar tidak langsung liquid
 
 # TRADE MANAGEMENT
 ENABLE_BREAK_EVEN = True
-BE_ACTIVATION_RR = 0.45
+BE_ACTIVATION_RR = 1.5     # Jangan digeser ke BE sebelum profit setidaknya 1.5x resiko (Beri napas!)
 BE_BUFFER_PCT = 0.0003
 
 # VOLATILITY REGIME FILTER
@@ -63,8 +63,8 @@ VOL_ATR_LEN_15M = 14
 VOL_LOOKBACK_15M = 48
 VOL_LOW_MULT = 0.70
 VOL_HIGH_MULT = 1.45
-HIGH_VOL_WIDEN_SL_MULT = 1.08
-HIGH_VOL_TP_MULT = 0.82
+HIGH_VOL_WIDEN_SL_MULT = 1.25 # SL dilebarkan sedikit saat volatile supaya tidak mudah tersapu sumbu (wick)
+HIGH_VOL_TP_MULT = 1.50       # TP makin dijauhkan saat volatilitas tinggi!
 
 # SNIPER PARAMETERS
 ADX_LEN = 14
@@ -82,10 +82,10 @@ EMA_SLOW = 19
 RSI_LEN = 12
 RSI_TREND_LONG_MIN = 46
 RSI_TREND_SHORT_MAX = 54
-TREND_RR = 1.55
-TREND_SL_ATR_MULT = 1.2
-TREND_SL_MIN_PCT = 0.0035
-TREND_SL_MAX_PCT = 0.010
+TREND_RR = 2.0             # 🔥 INCAR TP 4x LIPAT DARI SL DI MODE TREND (Super Brutal)
+TREND_SL_ATR_MULT = 1.5    # SL dijauhkan sedikit supaya bisa hold posisi lebih lama
+TREND_SL_MIN_PCT = 0.0050
+TREND_SL_MAX_PCT = 0.0150
 PULLBACK_ATR_TOL = 0.28
 TREND_CONFIRM_ATR_TOL = 0.16
 
@@ -93,16 +93,16 @@ TREND_CONFIRM_ATR_TOL = 0.16
 DONCHIAN_LEN = 14
 RSI_RANGE_LONG_MIN = 42
 RSI_RANGE_SHORT_MAX = 58
-RANGE_RR = 1.25
-RANGE_SL_ATR_MULT = 1.0
-RANGE_SL_MIN_PCT = 0.0030
-RANGE_SL_MAX_PCT = 0.009
+RANGE_RR = 2.5             # 🔥 INCAR TP 2.5x LIPAT DI MODE SIDEWAYS
+RANGE_SL_ATR_MULT = 1.2
+RANGE_SL_MIN_PCT = 0.0040
+RANGE_SL_MAX_PCT = 0.0120
 VOL_OK_RATIO_RANGE = 0.38
 DONCHIAN_ATR_TOL = 0.28
 
-MAX_TRADES_PER_DAY = 60
-COOLDOWN_MINUTES = 3
-LOSS_STREAK_LIMIT = 6
+MAX_TRADES_PER_DAY = 100   # Gaspol hajar terus
+COOLDOWN_MINUTES = 1       # Cooldown dipendekkan agar langsung sikat sinyal berikutnya
+LOSS_STREAK_LIMIT = 15     # 🔥 WAJIB NAIK: High RR pasti sering SL beruntun. Jangan kunci bot terlalu cepat.
 
 SLEEP_SLOW = 6
 SLEEP_FAST = 2
