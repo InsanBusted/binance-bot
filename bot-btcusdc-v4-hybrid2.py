@@ -58,45 +58,44 @@ TF_ENTRY = "5m"     # for entries
 
 # Regime detection (15m ADX) with hysteresis
 ADX_LEN = 14
-ADX_TREND_ON = 20.0   # switch to TREND if >= this
-ADX_RANGE_ON = 19.0   # switch to RANGE if <= this
-# If between 19..23 - keep previous mode (prevents flip-flop)
+ADX_TREND_ON = 18.0   # lebih gampang masuk mode trend
+ADX_RANGE_ON = 17.0   # lebih cepat balik ke range
 
 # Trend bias (15m)
 EMA_TREND_LEN = 200
-TREND_DEADBAND_PCT = 0.0012  # if price within +-0.12% of EMA200 - avoid trading
+TREND_DEADBAND_PCT = 0.0008  # dipersempit biar lebih sering boleh entry
 
 # TREND entry (5m)
-EMA_FAST = 9
-EMA_SLOW = 21
+EMA_FAST = 7
+EMA_SLOW = 18
 RSI_LEN = 14
-RSI_TREND_LONG_MIN = 55
-RSI_TREND_SHORT_MAX = 45
-TREND_RR = 1.5
-TREND_SL_ATR_MULT = 1.0
-TREND_SL_MIN_PCT = 0.0025   # 0.25%
-TREND_SL_MAX_PCT = 0.0100   # 1.00%
+RSI_TREND_LONG_MIN = 52
+RSI_TREND_SHORT_MAX = 48
+TREND_RR = 1.3
+TREND_SL_ATR_MULT = 0.9
+TREND_SL_MIN_PCT = 0.0020   # 0.20%
+TREND_SL_MAX_PCT = 0.0090   # 0.90%
 
 # RANGE entry (5m)
-DONCHIAN_LEN = 20
-RSI_RANGE_LONG_MIN = 45
-RSI_RANGE_SHORT_MAX = 55
-RANGE_RR = 0.9
-RANGE_SL_ATR_MULT = 0.55
-RANGE_SL_MIN_PCT = 0.0020   # 0.20%
-RANGE_SL_MAX_PCT = 0.0080   # 0.80%
+DONCHIAN_LEN = 16
+RSI_RANGE_LONG_MIN = 43
+RSI_RANGE_SHORT_MAX = 57
+RANGE_RR = 0.8
+RANGE_SL_ATR_MULT = 0.50
+RANGE_SL_MIN_PCT = 0.0018   # 0.18%
+RANGE_SL_MAX_PCT = 0.0070   # 0.70%
 
 # Risk
-RISK_PCT = 0.003  # 0.3% equity risk per trade
-MAX_NOTIONAL_FRACTION_OF_EQUITY = 0.3
+RISK_PCT = 0.0025  # 0.25% equity risk per trade
+MAX_NOTIONAL_FRACTION_OF_EQUITY = 0.35
 
 # Safety & pacing
-MAX_TRADES_PER_DAY = 12
-COOLDOWN_MINUTES = 10
-LOSS_STREAK_LIMIT = 5
-MAX_DAILY_DRAWDOWN_PCT = 0.04  # -4% hard stop (include unrealized)
+MAX_TRADES_PER_DAY = 20
+COOLDOWN_MINUTES = 5
+LOSS_STREAK_LIMIT = 6
+MAX_DAILY_DRAWDOWN_PCT = 0.05  # -5% hard stop
 
-SLEEP_SECONDS = 10
+SLEEP_SECONDS = 8
 RECV_WINDOW = 10_000
 ORDER_TYPE_ENTRY = "MARKET"
 
