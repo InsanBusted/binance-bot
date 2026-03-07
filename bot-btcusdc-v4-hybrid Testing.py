@@ -42,7 +42,7 @@ def call_with_retry(fn, *args, retries: int = 5, base_sleep: float = 1.0, **kwar
 # CONFIG
 # =========================
 SYMBOL = "BTCUSDC"
-LEVERAGE = 10
+LEVERAGE = 15
 
 USE_TESTNET = True
 
