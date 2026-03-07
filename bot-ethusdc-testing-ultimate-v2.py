@@ -628,7 +628,8 @@ def main():
         "position_open_ms": 0,
         "seen_tran_ids": set(),
         "entry_price": 0.0, "sl_dist_actual": 0.0, "pos_side": "", "be_activated": False, "be_failed_once": False, "qty_q": 0.0,
-        "force_test_done": False
+        "force_test_done": False,
+        "pnl_wait_notified": False
     })
 
     last_time_sync = time.time()
@@ -668,14 +669,18 @@ def main():
                 )
 
                 if not got_any:
-                    send_telegram("⚠️ ETH posisi tertutup, tapi data PnL Binance belum terbaca. Bot akan cek lagi di loop berikutnya.")
-                    save_state(st)
+                    if not st.get("pnl_wait_notified", False):
+                        send_telegram("⚠️ ETH posisi tertutup. Menunggu data PnL Binance...")
+                        st["pnl_wait_notified"] = True
+                        save_state(st)
+
                     time.sleep(SLEEP_SLOW)
                     continue
 
                 st["last_pnl_check_ms"] = int(time.time() * 1000)
                 st["daily_realized_pnl"] = float(st.get("daily_realized_pnl", 0.0)) + pnl
                 st["loss_streak"] = int(st.get("loss_streak", 0)) + 1 if pnl < 0 else 0
+                st["pnl_wait_notified"] = False
 
                 st.update({
                     "entry_price": 0.0,
