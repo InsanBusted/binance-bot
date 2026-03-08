@@ -768,6 +768,7 @@ def main():
 
     try:
         while True:
+            print(f"[{datetime.now()}] Debug: Loop berputar... Mark Price: {streamer.mark_price}")
             now = datetime.now(timezone.utc)
             current_mark_price = streamer.mark_price
 
