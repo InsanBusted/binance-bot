@@ -22,6 +22,7 @@ from typing import Tuple, Optional
 
 import requests
 import pandas as pd
+import numpy as np  # Ditambahkan untuk perhitungan CHOP
 from dotenv import load_dotenv
 from binance.client import Client
 from requests.exceptions import ReadTimeout, ConnectionError
@@ -52,41 +53,42 @@ SYMBOL = PAIR
 LEVERAGE = 15
 USE_TESTNET = True
 
-ENABLE_RANGE_MODE = True
+# Diubah ke False agar bot fokus menangkap tren (Trend-Following)
+ENABLE_RANGE_MODE = False
 USE_CLOSED_CANDLE_ONLY = True
 
 TF_REGIME = "15m"
 TF_ENTRY = "5m"
 
-# Regime detection
-ADX_LEN = 14
-ADX_TREND_ON = 18.0
-ADX_RANGE_ON = 17.0
+# Regime detection (MENGGUNAKAN CHOP)
+CHOP_LEN = 14
+CHOP_TREND_ON = 38.2
+CHOP_RANGE_ON = 61.8
 
 # Trend bias
 EMA_TREND_LEN = 200
 TREND_DEADBAND_PCT = 0.0008
 
-# TREND entry
-EMA_FAST = 7
-EMA_SLOW = 18
+# TREND entry (Optimasi EMA 20/50 & RSI 50)
+EMA_FAST = 20
+EMA_SLOW = 50
 RSI_LEN = 14
-RSI_TREND_LONG_MIN = 52
-RSI_TREND_SHORT_MAX = 48
-TREND_RR = 1.3
-TREND_SL_ATR_MULT = 1.8
+RSI_TREND_LONG_MIN = 50
+RSI_TREND_SHORT_MAX = 50
+TREND_RR = 1.5  # RR dinaikkan untuk memaksimalkan cuan di saat tren
+TREND_SL_ATR_MULT = 2.0  # SL dilonggarkan sedikit
 TREND_SL_MIN_PCT = 0.0060
 TREND_SL_MAX_PCT = 0.0200
 
 # V6 - structure aware stop loss
 USE_STRUCTURE_SL = True
 SWING_LOOKBACK_BARS = 7
-TREND_SWING_BUFFER_ATR_MULT = 0.25
+TREND_SWING_BUFFER_ATR_MULT = 0.5  # Buffer di bawah swing dilebarkan aman dari jarum
 RANGE_SWING_BUFFER_ATR_MULT = 0.15
 TREND_STRUCTURE_SL_HARD_MAX_PCT = 0.0300
 RANGE_STRUCTURE_SL_HARD_MAX_PCT = 0.0120
 
-# RANGE entry
+# RANGE entry (Tetap ada tapi tidak dieksekusi selama ENABLE_RANGE_MODE = False)
 DONCHIAN_LEN = 16
 RSI_RANGE_LONG_MIN = 43
 RSI_RANGE_SHORT_MAX = 57
@@ -164,7 +166,7 @@ def log_loop(now, equity, mode, bias, ok, reason, dbg: dict):
         "reason": str(reason),
     }
     for k in [
-        "price", "adx15", "ema200_15m", "dist_ema200_pct",
+        "price", "chop15", "ema200_15m", "dist_ema200_pct",
         "ema_fast", "ema_slow", "rsi5", "atr5",
         "don_hi", "don_lo", "touch", "rejection", "confirm"
     ]:
@@ -173,7 +175,7 @@ def log_loop(now, equity, mode, bias, ok, reason, dbg: dict):
 
     header = [
         "ts", "equity", "mode", "bias", "ok", "reason",
-        "price", "adx15", "ema200_15m", "dist_ema200_pct",
+        "price", "chop15", "ema200_15m", "dist_ema200_pct",
         "ema_fast", "ema_slow", "rsi5", "atr5",
         "don_hi", "don_lo", "touch", "rejection", "confirm"
     ]
@@ -192,7 +194,7 @@ def log_trade_open(now, side, entry_price, qty, sl, tp, risk_usd, notional, dbg)
         "tp": round(float(tp), 6),
         "risk_usd": round(float(risk_usd), 6),
         "notional": round(float(notional), 6),
-        "adx15": round(float(dbg.get("adx15", 0.0)), 4),
+        "chop15": round(float(dbg.get("chop15", 0.0)), 4),
         "rsi5": round(float(dbg.get("rsi5", 0.0)), 4),
         "atr5": round(float(dbg.get("atr5", 0.0)), 6),
         "ema200_15m": round(float(dbg.get("ema200_15m", 0.0)), 6),
@@ -203,7 +205,7 @@ def log_trade_open(now, side, entry_price, qty, sl, tp, risk_usd, notional, dbg)
     }
     header = [
         "ts", "event", "side", "mode", "bias", "entry", "qty", "sl", "tp",
-        "risk_usd", "notional", "adx15", "rsi5", "atr5",
+        "risk_usd", "notional", "chop15", "rsi5", "atr5",
         "ema200_15m", "ema_fast", "ema_slow", "don_hi", "don_lo"
     ]
     _append_csv(TRADES_LOG, header, row)
@@ -480,31 +482,24 @@ def atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
     ], axis=1).max(axis=1)
     return tr.ewm(alpha=1 / length, adjust=False).mean()
 
-def adx(df: pd.DataFrame, length: int = 14) -> pd.Series:
-    high = df["high"]
-    low = df["low"]
-    close = df["close"]
-
-    up = high.diff()
-    down = -low.diff()
-
-    plus_dm = pd.Series(0.0, index=df.index)
-    minus_dm = pd.Series(0.0, index=df.index)
-
-    plus_dm[(up > down) & (up > 0)] = up[(up > down) & (up > 0)]
-    minus_dm[(down > up) & (down > 0)] = down[(down > up) & (down > 0)]
-
+def chop(df: pd.DataFrame, length: int = 14) -> pd.Series:
+    # Menghitung True Range (TR)
     tr = pd.concat([
-        (high - low),
-        (high - close.shift(1)).abs(),
-        (low - close.shift(1)).abs()
+        (df["high"] - df["low"]),
+        (df["high"] - df["close"].shift(1)).abs(),
+        (df["low"] - df["close"].shift(1)).abs()
     ], axis=1).max(axis=1)
-
-    atr_s = tr.ewm(alpha=1 / length, adjust=False).mean()
-    plus_di = 100 * (plus_dm.ewm(alpha=1 / length, adjust=False).mean() / atr_s.replace(0, 1e-12))
-    minus_di = 100 * (minus_dm.ewm(alpha=1 / length, adjust=False).mean() / atr_s.replace(0, 1e-12))
-    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1e-12)
-    return dx.ewm(alpha=1 / length, adjust=False).mean()
+    
+    atr_sum = tr.rolling(length).sum()
+    highest_high = df["high"].rolling(length).max()
+    lowest_low = df["low"].rolling(length).min()
+    
+    # Mencegah error pembagian dengan nol
+    range_hl = (highest_high - lowest_low).replace(0, 1e-12)
+    
+    # Rumus asli Choppiness Index
+    chop_idx = 100 * np.log10(atr_sum / range_hl) / np.log10(length)
+    return chop_idx
 
 
 # =========================
@@ -513,13 +508,13 @@ def adx(df: pd.DataFrame, length: int = 14) -> pd.Series:
 def compute_regime_and_bias(prev_mode: str) -> Tuple[str, str, dict]:
     df15 = klines_df(SYMBOL, TF_REGIME, limit=max(EMA_TREND_LEN + 60, 320))
     df15["ema200"] = ema(df15["close"], EMA_TREND_LEN)
-    df15["adx"] = adx(df15, ADX_LEN)
+    df15["chop"] = chop(df15, CHOP_LEN)
 
     idx = -2 if USE_CLOSED_CANDLE_ONLY else -1
     last = df15.iloc[idx]
     price = float(last["close"])
     e200 = float(last["ema200"])
-    ax = float(last["adx"])
+    chop_val = float(last["chop"])
 
     dist_pct = 0.0
     if e200 > 0:
@@ -530,14 +525,16 @@ def compute_regime_and_bias(prev_mode: str) -> Tuple[str, str, dict]:
         bias = "LONG" if price > e200 else "SHORT"
 
     mode = prev_mode if prev_mode in ("TREND", "RANGE") else "RANGE"
-    if ax >= ADX_TREND_ON:
+    
+    # Penentuan Mode menggunakan CHOP
+    if chop_val <= CHOP_TREND_ON:
         mode = "TREND"
-    elif ax <= ADX_RANGE_ON:
+    elif chop_val >= CHOP_RANGE_ON:
         mode = "RANGE"
 
     dbg = {
         "price": price,
-        "adx15": ax,
+        "chop15": chop_val,
         "ema200_15m": e200,
         "dist_ema200_pct": dist_pct,
     }
@@ -588,8 +585,15 @@ def signal_trend_mode(df5: pd.DataFrame, bias: str) -> Tuple[bool, Optional[str]
     candle_bull = float(last["close"]) > float(last["open"])
     candle_bear = float(last["close"]) < float(last["open"])
 
-    pullback_touch_long = float(last["low"]) <= ema_slow_v
-    pullback_touch_short = float(last["high"]) >= ema_slow_v
+    # OPTIMASI PULLBACK: Cek apakah 3 candle terakhir ada yang menyentuh EMA 20
+    lookback = 3
+    if USE_CLOSED_CANDLE_ONLY:
+        window = df5.iloc[-(lookback+1):-1]
+    else:
+        window = df5.iloc[-lookback:]
+
+    pullback_touch_long = any(float(row["low"]) <= float(row["ema_fast"]) for _, row in window.iterrows())
+    pullback_touch_short = any(float(row["high"]) >= float(row["ema_fast"]) for _, row in window.iterrows())
 
     dbg = {"touch": False, "rejection": False, "confirm": False}
 
@@ -783,7 +787,7 @@ def _cancel_tp_limit_orders():
 def manage_hybrid_tp_exit(st: dict, now: datetime, current_mark: Optional[float] = None) -> bool:
     if not USE_HYBRID_TP_EXIT:
         return False
-
+    
 
     tp_price = float(st.get("tp_price", 0.0) or 0.0)
     entry_price = float(st.get("entry_price", 0.0) or 0.0)
@@ -812,7 +816,7 @@ def manage_hybrid_tp_exit(st: dict, now: datetime, current_mark: Optional[float]
             atr_at_entry * TP_FALLBACK_BUFFER_ATR_MULT if atr_at_entry > 0 else 0.0
         )
     )
-
+    
 
     if side == "BUY":
         should_fallback = current_mark >= (tp_price - buffer_abs)
@@ -1138,14 +1142,14 @@ def main():
 
     print("MinNotional:", min_notional)
     mode_label = "TESTNET" if USE_TESTNET else "REAL"
-    print(f"{SYMBOL} V6 HYBRID START ({mode_label}) | Lev:{LEVERAGE} | Regime:{TF_REGIME} ADX{ADX_LEN} | Entry:{TF_ENTRY}")
+    print(f"{SYMBOL} V6 HYBRID START ({mode_label}) | Lev:{LEVERAGE} | Regime:{TF_REGIME} CHOP{CHOP_LEN} | Entry:{TF_ENTRY}")
 
     send_telegram_throttled(
         "startup",
         f"🟢 {TG_PREFIX} started\n"
         f"Symbol: {SYMBOL}\nLev: {LEVERAGE}\n"
         f"Equity: {round(current_equity, 4)} {QUOTE_ASSET}\n"
-        f"Trend ADX>={ADX_TREND_ON}, Range ADX<={ADX_RANGE_ON}\n"
+        f"Trend CHOP<={CHOP_TREND_ON}, Range CHOP>={CHOP_RANGE_ON}\n"
         f"Risk: {RISK_PCT*100:.2f}% | DailyStop: {MAX_DAILY_DRAWDOWN_PCT*100:.1f}%\n"
         f"Cooldown: {COOLDOWN_MINUTES}m | LossStreakStop: {LOSS_STREAK_LIMIT}\n"
         f"BracketFailLock: {BRACKET_FAIL_LOCK_LIMIT}\n"
@@ -1398,7 +1402,7 @@ def main():
                 "eq:", round(equity_now, 4),
                 "| mode:", st["mode"],
                 "| bias:", bias,
-                "| adx15:", round(float(dbg15.get("adx15", 0.0)), 2),
+                "| chop15:", round(float(dbg15.get("chop15", 0.0)), 2),
                 "| ok:", ok,
                 "|", reason,
             )
@@ -1477,7 +1481,7 @@ def main():
                     f"SL: {round(sl_final, 6)} | TP: {round(tp_final, 6)}\n"
                     f"Risk~: {round(qty_final * sl_dist_actual, 4)} {QUOTE_ASSET}\n"
                     f"Notional~: {round(qty_final * actual_entry, 4)}\n"
-                    f"ADX15: {round(float(dbg.get('adx15', 0.0)), 2)} | "
+                    f"CHOP15: {round(float(dbg.get('chop15', 0.0)), 2)} | "
                     f"RSI5: {round(float(dbg.get('rsi5', 0.0)), 2)} | "
                     f"ATR5: {round(float(dbg.get('atr5', 0.0)), 6)}\n"
                     f"TradesToday: {st['trades_today']}"
@@ -1522,3 +1526,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
