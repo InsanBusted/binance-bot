@@ -354,6 +354,14 @@ def klines_df(symbol, interval, limit):
         df[c] = df[c].astype(float)
     return df
 
+def get_mark_price():
+    try:
+        # Mengambil harga mark price terbaru dari Binance Futures
+        mp = call_with_retry(client.futures_mark_price, symbol=SYMBOL)
+        return float(mp["markPrice"])
+    except Exception as e:
+        print(f"Error di get_mark_price: {e}")
+        return 0.0
 
 # =========================
 # INDIKATOR (CHOP & TRIPLE EMA)
