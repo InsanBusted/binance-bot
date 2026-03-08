@@ -366,8 +366,12 @@ def get_mark_price():
 def check_telegram_commands(st):
     """Mengecek pesan masuk dari Telegram (Polling singkat)"""
     try:
+        # Mengambil token dari .env (Perbaikan Bug 1)
+        token = os.getenv("TELEGRAM_TOKEN")
+        if not token: return
+        
         # Kita gunakan limit 1 dan timeout pendek agar tidak menghambat loop trading
-        url = f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates?offset=-1&limit=1"
+        url = f"https://api.telegram.org/bot{token}/getUpdates?offset=-1&limit=1"
         resp = requests.get(url, timeout=2).json()
         
         if resp.get("ok") and resp.get("result"):
@@ -385,10 +389,10 @@ def check_telegram_commands(st):
                         f"📊 *STATUS REPORT*\n"
                         f"━━━━━━━━━━━━━━━\n"
                         f"💰 Equity: ${eq:.2f}\n"
-                        f"📈 PnL Today: ${st['daily_realized_pnl']:.2f}\n"
-                        f"🔄 Trades: {st['trades_today']}\n"
-                        f"🤖 Mode: {st['mode']}\n"
-                        f"📍 Status: {'🟢 IN POSITION' if st['prev_in_position'] else '⚪ IDLE'}"
+                        f"📈 PnL Today: ${st.get('daily_realized_pnl', 0.0):.2f}\n"
+                        f"🔄 Trades: {st.get('trades_today', 0)}\n"
+                        f"🤖 Mode: {st.get('mode', 'N/A')}\n"
+                        f"📍 Status: {'🟢 IN POSITION' if st.get('prev_in_position') else '⚪ IDLE'}"
                     )
                     send_telegram(msg)
                 
@@ -397,8 +401,8 @@ def check_telegram_commands(st):
                     os._exit(0) # Mematikan bot secara paksa
                     
     except Exception as e:
-        # Abaikan error telegram agar loop trading tetap jalan
-        pass
+        # Print error agar terekam di log PM2 (Perbaikan Bug 4)
+        print(f"[{datetime.now()}] Telegram polling error: {e}")
 
 # =========================
 # INDIKATOR (CHOP & TRIPLE EMA)
@@ -583,7 +587,6 @@ def signal_trend_mode(df5: pd.DataFrame, bias: str) -> Tuple[Optional[str], str,
         if not pullback_touch_short: return None, "no_pullback_touch_ema20", dbg
         
         # Cek Fake Out Ekor Bawah (Wick Rejection) SEBELUM konfirmasi SELL
-        # Jika ekor bawah lebih panjang dari bodi, artinya ada dorongan beli kuat dari bawah (bahaya untuk di-Short)
         if lower_wick > candle_body:
             return None, "fakeout_short_wick_rejected", dbg
 
@@ -823,8 +826,6 @@ def main():
             if current_mark_price <= 0:
                 try:
                     current_mark_price = get_mark_price()
-                    # Optional: print agar kamu tahu di log kalau sedang pakai REST
-                    # print(f"[{datetime.now()}] ⚠️ WebSocket Delay, using REST: {current_mark_price}")
                 except Exception as e:
                     print(f"[{datetime.now()}] 🚨 Fatal: API Error saat ambil harga: {e}")
                     time.sleep(2)
@@ -832,9 +833,10 @@ def main():
 
             # Debugging agar kamu bisa pantau di PM2 Logs
             if int(time.time()) % 10 == 0: # Print setiap 10 detik biar gak spam
-                print(f"[{datetime.now()}] Mode: {st['mode']} | Price: {current_mark_price} | Pos: {st['prev_in_position']}")
+                print(f"[{datetime.now()}] Mode: {st.get('mode', 'N/A')} | Price: {current_mark_price} | Pos: {st.get('prev_in_position', False)}")
 
             # PENTING: Untuk logika di bawah ini, SELALU gunakan current_mark_price
+            
             # ==========================================
             # 1. LOOP SUPER CEPAT (Real-time Break-Even)
             # ==========================================
@@ -849,21 +851,6 @@ def main():
                 
                 # Gunakan current_mark_price di sini
                 manage_break_even(st, current_mark_price, tick_size, st.get("qty_q", 0.0))
-            
-            # ==========================================
-            # 1. LOOP SUPER CEPAT (Real-time Break-Even)
-            # ==========================================
-            if st.get("prev_in_position") and current_mark_price > 0:
-                # Failsafe: Jika state mencatat in_position tapi entry_price 0, sinkronkan ulang
-                if float(st.get("entry_price", 0.0)) <= 0:
-                     pos_amt = get_position_amt()
-                     if abs(pos_amt) > 0:
-                         # Ambil entry price langsung dari API Binance (REST)
-                         pos_info = call_with_retry(client.futures_position_information, symbol=SYMBOL)
-                         st["entry_price"] = float(pos_info[0].get("entryPrice", current_mark_price))
-                         save_state(st)
-                
-                manage_break_even(st, current_mark_price, tick_size, st.get("qty_q", 0.0))
 
             # ==========================================
             # 2. LOOP MENENGAH (Cek Status Posisi & Saldo)
@@ -873,8 +860,9 @@ def main():
                 
                 if (time.time() - last_time_sync) >= TIME_SYNC_EVERY_S:
                     if sync_time_offset(): last_time_sync = time.time()
-                    
-                    check_telegram_commands(st)
+                
+                # PENEMPATAN FIX 2: Check telegram sejajar di sini (tiap REST_INTERVAL)
+                check_telegram_commands(st)
 
                 # --- HEALTH CHECK TELEGRAM ---
                 if time.time() - last_health_check >= HEALTH_CHECK_S:
@@ -882,8 +870,8 @@ def main():
                     eq_check = get_wallet_balance_quote()
                     send_telegram(
                         f"🤖 {SYMBOL} Health Check\n"
-                        f"Equity: ${eq_check:.2f} | PnL Day: ${st['daily_realized_pnl']:.2f}\n"
-                        f"Trades: {st['trades_today']} | Status: {'🟢 In Pos' if st['prev_in_position'] else '⚪ Idle'}"
+                        f"Equity: ${eq_check:.2f} | PnL Day: ${st.get('daily_realized_pnl', 0.0):.2f}\n"
+                        f"Trades: {st.get('trades_today', 0)} | Status: {'🟢 In Pos' if st.get('prev_in_position') else '⚪ Idle'}"
                     )
 
                 cur_day = now.date().isoformat()
