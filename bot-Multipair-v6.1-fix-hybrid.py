@@ -108,8 +108,8 @@ MAX_DAILY_DRAWDOWN_PCT = 0.05
 BRACKET_FAIL_LOCK_LIMIT = 3
 
 # V6 - jangan spam telegram saat close tapi PnL Binance belum muncul
-PNL_FETCH_RETRIES_PER_LOOP = 2
-PNL_FETCH_WAIT_SEC = 1.5
+PNL_FETCH_RETRIES_PER_LOOP = 1
+PNL_FETCH_WAIT_SEC = 2.0
 PNL_RECHECK_DELAY_MINUTES = 7
 
 # V6.1 - hybrid TP exit
@@ -118,7 +118,11 @@ TP_LIMIT_MAKER_OFFSET_TICKS = 1
 TP_FALLBACK_BUFFER_ATR_MULT = 0.12
 TP_FALLBACK_MIN_PCT = 0.00025
 TP_FALLBACK_MAX_PCT = 0.00080
-TP_FALLBACK_COOLDOWN_SECONDS = 15
+TP_FALLBACK_COOLDOWN_SECONDS = 45
+
+# anti rate-limit tuning
+IN_POSITION_SLEEP_SECONDS = 6
+TP_MANAGE_MARK_CHECK_COOLDOWN_SECONDS = 8
 
 SLEEP_SECONDS = 10
 RECV_WINDOW = 10_000
@@ -380,12 +384,12 @@ def get_wallet_balance_quote() -> float:
         bal = call_with_retry(client.futures_account_balance, recvWindow=RECV_WINDOW)
         for b in bal:
             if b.get("asset") == QUOTE_ASSET:
-                return float(b.get("balance", 0.0))
+                return float(b.get("availableBalance", 0.0))
         return 0.0
     except Exception as e:
         print("WARN get_wallet_balance:", e)
         return 0.0
-
+    
 def get_position_amt() -> float:
     try:
         pos = call_with_retry(client.futures_position_information, symbol=SYMBOL, recvWindow=RECV_WINDOW)
@@ -395,6 +399,21 @@ def get_position_amt() -> float:
     except Exception as e:
         print("WARN get_position_amt:", e)
         return 0.0
+
+def get_position_snapshot():
+    try:
+        pos = call_with_retry(client.futures_position_information, symbol=SYMBOL, recvWindow=RECV_WINDOW)
+        if not pos:
+            return 0.0, 0.0, 0.0
+        p = pos[0]
+        return (
+            float(p.get("positionAmt", 0.0)),
+            float(p.get("unRealizedProfit", 0.0)),
+            float(p.get("entryPrice", 0.0)),
+        )
+    except Exception as e:
+        print("WARN get_position_snapshot:", e)
+        return 0.0, 0.0, 0.0
 
 def has_open_position() -> bool:
     return abs(get_position_amt()) > 0.0
@@ -728,12 +747,18 @@ def calc_qty_from_risk(equity: float, price: float, sl_dist: float) -> Tuple[flo
     return qty, actual_risk_usd, approx_notional
 
 def _cancel_tp_limit_orders():
+    """
+    Cancel TP LIMIT reduceOnly saja.
+    Return True kalau ada order yang dibatalkan.
+    """
+    canceled_any = False
     try:
         open_orders = call_with_retry(
             client.futures_get_open_orders,
             symbol=SYMBOL,
             recvWindow=RECV_WINDOW
         )
+
         for o in open_orders or []:
             if o.get("symbol") != SYMBOL:
                 continue
@@ -741,20 +766,24 @@ def _cancel_tp_limit_orders():
                 continue
             if o.get("type") != "LIMIT":
                 continue
+
             call_with_retry(
                 client.futures_cancel_order,
                 symbol=SYMBOL,
                 orderId=o["orderId"],
                 recvWindow=RECV_WINDOW
             )
+            canceled_any = True
+
     except Exception as e:
         print("WARN cancel tp limit orders:", e)
 
-def manage_hybrid_tp_exit(st: dict, now: datetime) -> bool:
+    return canceled_any
+
+def manage_hybrid_tp_exit(st: dict, now: datetime, current_mark: Optional[float] = None) -> bool:
     if not USE_HYBRID_TP_EXIT:
         return False
-    if not has_open_position():
-        return False
+
 
     tp_price = float(st.get("tp_price", 0.0) or 0.0)
     entry_price = float(st.get("entry_price", 0.0) or 0.0)
@@ -769,13 +798,22 @@ def manage_hybrid_tp_exit(st: dict, now: datetime) -> bool:
     if (time.time() - last_manage_ts) < TP_FALLBACK_COOLDOWN_SECONDS:
         return False
 
-    current_mark = get_mark_price()
+    last_mark_check_ts = float(st.get("last_tp_mark_check_ts", 0.0) or 0.0)
+    if current_mark is None:
+        if (time.time() - last_mark_check_ts) < TP_MANAGE_MARK_CHECK_COOLDOWN_SECONDS:
+            return False
+        current_mark = get_mark_price()
+        st["last_tp_mark_check_ts"] = time.time()
+
     buffer_abs = max(
         current_mark * TP_FALLBACK_MIN_PCT,
-        min(current_mark * TP_FALLBACK_MAX_PCT, atr_at_entry * TP_FALLBACK_BUFFER_ATR_MULT if atr_at_entry > 0 else 0.0)
+        min(
+            current_mark * TP_FALLBACK_MAX_PCT,
+            atr_at_entry * TP_FALLBACK_BUFFER_ATR_MULT if atr_at_entry > 0 else 0.0
+        )
     )
 
-    should_fallback = False
+
     if side == "BUY":
         should_fallback = current_mark >= (tp_price - buffer_abs)
         close_side = "SELL"
@@ -805,6 +843,7 @@ def manage_hybrid_tp_exit(st: dict, now: datetime) -> bool:
     )
 
     st["last_tp_manage_ts"] = time.time()
+
     send_telegram_throttled(
         "tp_fallback_exit",
         f"🎯 TP fallback market exit {SYMBOL}\n"
@@ -948,21 +987,22 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
             )
         except Exception as e_tp:
             msg = str(e_tp)
-            # Menangkap error penolakan Post-Only (-2010)
             if "-2010" in msg or "immediately match" in msg:
-                print("GTX Rejected! Harga terlalu dekat. Mengirim TP Market Darurat...")
+                print("GTX rejected. Fallback ke LIMIT reduceOnly biasa...")
                 tp_resp = call_with_retry(
                     client.futures_create_order,
                     symbol=SYMBOL,
                     side=op_side,
-                    type="MARKET",
+                    type="LIMIT",
+                    price=tp_limit_price,
                     quantity=actual_pos_amt_q,
                     reduceOnly=True,
+                    timeInForce="GTC",
                     recvWindow=RECV_WINDOW
                 )
             else:
-                raise e_tp # Lemparkan error jika masalahnya bukan karena GTX
-
+                raise e_tp
+            
         if not _has_valid_order_ref(sl_resp):
             raise RuntimeError(f"SL order gagal / id tidak ada | resp={sl_resp}")
         if not _has_valid_order_ref(tp_resp):
@@ -1139,6 +1179,7 @@ def main():
         "entry_order_side": "",
         "atr_at_entry": 0.0,
         "last_tp_manage_ts": 0.0,
+        "last_tp_mark_check_ts": 0.0,
     })
 
     def _save_state():
@@ -1191,6 +1232,7 @@ def main():
                     "entry_order_side": "",
                     "atr_at_entry": 0.0,
                     "last_tp_manage_ts": 0.0,
+                    "last_tp_mark_check_ts": 0.0,
                 })
                 send_telegram_throttled(
                     "new_day",
@@ -1204,13 +1246,13 @@ def main():
                 continue
 
             equity_now = get_wallet_balance_quote()
-            in_pos = has_open_position()
+            pos_amt, unrealized_pnl, pos_entry_price = get_position_snapshot()
+            in_pos = abs(pos_amt) > 0.0
 
             if st["start_equity_today"] <= 0:
                 st["start_equity_today"] = equity_now
 
-            unrealized_pnl = get_unrealized_pnl() if in_pos else 0.0
-            total_daily_pnl = st["daily_realized_pnl"] + unrealized_pnl
+            total_daily_pnl = st["daily_realized_pnl"] + (unrealized_pnl if in_pos else 0.0)
             daily_dd = (total_daily_pnl / st["start_equity_today"]) if st["start_equity_today"] > 0 else 0.0
 
             if daily_dd <= -abs(MAX_DAILY_DRAWDOWN_PCT):
@@ -1291,6 +1333,7 @@ def main():
                 st["entry_order_side"] = ""
                 st["atr_at_entry"] = 0.0
                 st["last_tp_manage_ts"] = 0.0
+                st["last_tp_mark_check_ts"] = 0.0
                 st["awaiting_pnl_sync"] = False
                 st["pnl_pending_notified"] = False
                 st["next_pnl_recheck_at"] = None
@@ -1318,11 +1361,19 @@ def main():
 
             if in_pos:
                 st["prev_in_position"] = True
-                if manage_hybrid_tp_exit(st, now):
+
+                current_mark = None
+                last_tp_mark_check_ts = float(st.get("last_tp_mark_check_ts", 0.0) or 0.0)
+                if (time.time() - last_tp_mark_check_ts) >= TP_MANAGE_MARK_CHECK_COOLDOWN_SECONDS:
+                    current_mark = get_mark_price()
+                    st["last_tp_mark_check_ts"] = time.time()
+
+                if manage_hybrid_tp_exit(st, now, current_mark=current_mark):
                     _save_state()
-                    time.sleep(1.5)
+                    time.sleep(IN_POSITION_SLEEP_SECONDS)
                     continue
-                time.sleep(1.5)
+
+                time.sleep(IN_POSITION_SLEEP_SECONDS)
                 continue
 
             st["prev_in_position"] = False
@@ -1410,6 +1461,7 @@ def main():
                 st["entry_order_side"] = side
                 st["atr_at_entry"] = atr_val
                 st["last_tp_manage_ts"] = 0.0
+                st["last_tp_mark_check_ts"] = 0.0
                 st["position_open_ms"] = int(time.time() * 1000)
                 st["bracket_fail_streak"] = 0
                 st["awaiting_pnl_sync"] = False
