@@ -362,6 +362,43 @@ def get_mark_price():
     except Exception as e:
         print(f"Error di get_mark_price: {e}")
         return 0.0
+    
+def check_telegram_commands(st):
+    """Mengecek pesan masuk dari Telegram (Polling singkat)"""
+    try:
+        # Kita gunakan limit 1 dan timeout pendek agar tidak menghambat loop trading
+        url = f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates?offset=-1&limit=1"
+        resp = requests.get(url, timeout=2).json()
+        
+        if resp.get("ok") and resp.get("result"):
+            last_msg = resp["result"][0]
+            text = last_msg.get("message", {}).get("text", "")
+            update_id = last_msg.get("update_id")
+            
+            # Gunakan seen_update_id agar bot tidak menjawab pesan yang sama berulang kali
+            if update_id != st.get("last_tg_update_id"):
+                st["last_tg_update_id"] = update_id
+                
+                if text == "/status":
+                    eq = get_wallet_balance_quote()
+                    msg = (
+                        f"📊 *STATUS REPORT*\n"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"💰 Equity: ${eq:.2f}\n"
+                        f"📈 PnL Today: ${st['daily_realized_pnl']:.2f}\n"
+                        f"🔄 Trades: {st['trades_today']}\n"
+                        f"🤖 Mode: {st['mode']}\n"
+                        f"📍 Status: {'🟢 IN POSITION' if st['prev_in_position'] else '⚪ IDLE'}"
+                    )
+                    send_telegram(msg)
+                
+                elif text == "/stop":
+                    send_telegram("⚠️ Emergency Stop received! Bot shutting down...")
+                    os._exit(0) # Mematikan bot secara paksa
+                    
+    except Exception as e:
+        # Abaikan error telegram agar loop trading tetap jalan
+        pass
 
 # =========================
 # INDIKATOR (CHOP & TRIPLE EMA)
@@ -836,6 +873,8 @@ def main():
                 
                 if (time.time() - last_time_sync) >= TIME_SYNC_EVERY_S:
                     if sync_time_offset(): last_time_sync = time.time()
+                    
+                    check_telegram_commands(st)
 
                 # --- HEALTH CHECK TELEGRAM ---
                 if time.time() - last_health_check >= HEALTH_CHECK_S:
