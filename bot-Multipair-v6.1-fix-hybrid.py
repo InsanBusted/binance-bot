@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # bot-multipair-v6-hybrid.py
-# Multi-Pair USD-M Futures - HYBRID Trend + Range
+# Multipair USD-M Futures - HYBRID Trend + Range
 # Safer execution engine:
 # - Actual entry price after fill
 # - Bracket placement without aggressive open-order verification
@@ -44,9 +44,7 @@ def call_with_retry(fn, *args, retries: int = 5, base_sleep: float = 1.0, **kwar
 # =========================
 # CONFIG
 # =========================
-
-# SILAKAN GANTI PAIR DI SINI:
-PAIR = "BCHUSDT"  # Ganti dengan "BTCUSDT", "ETHUSDT", atau pair lainnya sesuai kebutuhan
+PAIR = "BCHUSDT"
 BASE_ASSET = PAIR[:-4]
 QUOTE_ASSET = PAIR[-4:]
 
@@ -113,6 +111,14 @@ BRACKET_FAIL_LOCK_LIMIT = 3
 PNL_FETCH_RETRIES_PER_LOOP = 2
 PNL_FETCH_WAIT_SEC = 1.5
 PNL_RECHECK_DELAY_MINUTES = 7
+
+# V6.1 - hybrid TP exit
+USE_HYBRID_TP_EXIT = True
+TP_LIMIT_MAKER_OFFSET_TICKS = 1
+TP_FALLBACK_BUFFER_ATR_MULT = 0.12
+TP_FALLBACK_MIN_PCT = 0.00025
+TP_FALLBACK_MAX_PCT = 0.00080
+TP_FALLBACK_COOLDOWN_SECONDS = 15
 
 SLEEP_SECONDS = 10
 RECV_WINDOW = 10_000
@@ -705,7 +711,6 @@ def calc_effective_sl_dist(price: float, atr_val: float, mode: str, side: Option
     structure_dist = min(structure_dist, price * hard_max_pct)
     return max(sl_dist, structure_dist)
 
-# REVISI PENTING: Kalkulasi ulang risk_usd jika qty dipotong oleh limit max_notional
 def calc_qty_from_risk(equity: float, price: float, sl_dist: float) -> Tuple[float, float, float]:
     target_risk_usd = equity * RISK_PCT
     if sl_dist <= 0:
@@ -715,17 +720,100 @@ def calc_qty_from_risk(equity: float, price: float, sl_dist: float) -> Tuple[flo
 
     max_notional = equity * LEVERAGE * MAX_NOTIONAL_FRACTION_OF_EQUITY
     approx_notional = qty * price
-    
     if max_notional > 0 and approx_notional > max_notional:
         qty = max_notional / price
         approx_notional = qty * price
-        
-        # Risk aktual menyesuaikan qty yang terpotong max_notional
-        actual_risk_usd = qty * sl_dist 
-    else:
-        actual_risk_usd = target_risk_usd
 
+    actual_risk_usd = qty * sl_dist
     return qty, actual_risk_usd, approx_notional
+
+def _cancel_tp_limit_orders():
+    try:
+        open_orders = call_with_retry(
+            client.futures_get_open_orders,
+            symbol=SYMBOL,
+            recvWindow=RECV_WINDOW
+        )
+        for o in open_orders or []:
+            if o.get("symbol") != SYMBOL:
+                continue
+            if o.get("reduceOnly") not in (True, "true", "TRUE"):
+                continue
+            if o.get("type") != "LIMIT":
+                continue
+            call_with_retry(
+                client.futures_cancel_order,
+                symbol=SYMBOL,
+                orderId=o["orderId"],
+                recvWindow=RECV_WINDOW
+            )
+    except Exception as e:
+        print("WARN cancel tp limit orders:", e)
+
+def manage_hybrid_tp_exit(st: dict, now: datetime) -> bool:
+    if not USE_HYBRID_TP_EXIT:
+        return False
+    if not has_open_position():
+        return False
+
+    tp_price = float(st.get("tp_price", 0.0) or 0.0)
+    entry_price = float(st.get("entry_price", 0.0) or 0.0)
+    qty_q = float(st.get("qty_q", 0.0) or 0.0)
+    side = st.get("entry_order_side", "")
+    atr_at_entry = float(st.get("atr_at_entry", 0.0) or 0.0)
+
+    if tp_price <= 0 or entry_price <= 0 or qty_q <= 0 or side not in ("BUY", "SELL"):
+        return False
+
+    last_manage_ts = float(st.get("last_tp_manage_ts", 0.0) or 0.0)
+    if (time.time() - last_manage_ts) < TP_FALLBACK_COOLDOWN_SECONDS:
+        return False
+
+    current_mark = get_mark_price()
+    buffer_abs = max(
+        current_mark * TP_FALLBACK_MIN_PCT,
+        min(current_mark * TP_FALLBACK_MAX_PCT, atr_at_entry * TP_FALLBACK_BUFFER_ATR_MULT if atr_at_entry > 0 else 0.0)
+    )
+
+    should_fallback = False
+    if side == "BUY":
+        should_fallback = current_mark >= (tp_price - buffer_abs)
+        close_side = "SELL"
+    else:
+        should_fallback = current_mark <= (tp_price + buffer_abs)
+        close_side = "BUY"
+
+    if not should_fallback:
+        return False
+
+    filters = _get_symbol_filters(SYMBOL)
+    step = float(filters["LOT_SIZE"]["stepSize"])
+    qty_close = _quantize_step(qty_q, step)
+    if qty_close <= 0:
+        return False
+
+    _cancel_tp_limit_orders()
+
+    call_with_retry(
+        client.futures_create_order,
+        symbol=SYMBOL,
+        side=close_side,
+        type="MARKET",
+        quantity=qty_close,
+        reduceOnly=True,
+        recvWindow=RECV_WINDOW
+    )
+
+    st["last_tp_manage_ts"] = time.time()
+    send_telegram_throttled(
+        "tp_fallback_exit",
+        f"🎯 TP fallback market exit {SYMBOL}\n"
+        f"Side: {'LONG' if side == 'BUY' else 'SHORT'}\n"
+        f"Mark: {round(current_mark, 6)} | Target: {round(tp_price, 6)}\n"
+        f"Buffer~: {round(buffer_abs, 6)}",
+        min_seconds=30,
+    )
+    return True
 
 def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mode: str, mark_price: float, structure_stop_price: Optional[float] = None):
     filters = _get_symbol_filters(SYMBOL)
@@ -747,44 +835,20 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
             print("WARN get fresh mark price failed:", e)
             return float(fallback_price)
 
-    def _sanitize_bracket_prices(side_: str, sl_raw: float, tp_raw: float, current_mark: float):
+    def _sanitize_sl_price(side_: str, sl_raw: float, current_mark: float):
         min_gap_ticks = 3
         gap = tick * min_gap_ticks
-
         sl_adj = _round_tick(sl_raw, tick)
-        tp_adj = _round_tick(tp_raw, tick)
 
         if side_ == "BUY":
-            # Long
             max_sl = _round_tick(current_mark - gap, tick)
-            min_tp = _round_tick(current_mark + gap, tick)
-
             if sl_adj >= current_mark:
                 sl_adj = max_sl
-            if tp_adj <= current_mark:
-                tp_adj = min_tp
-
-            # jaga agar SL tetap di bawah TP
-            if sl_adj >= tp_adj:
-                sl_adj = _round_tick(current_mark - (gap * 2), tick)
-                tp_adj = _round_tick(current_mark + (gap * 2), tick)
-
         else:
-            # Short
             min_sl = _round_tick(current_mark + gap, tick)
-            max_tp = _round_tick(current_mark - gap, tick)
-
             if sl_adj <= current_mark:
                 sl_adj = min_sl
-            if tp_adj >= current_mark:
-                tp_adj = max_tp
-
-            # jaga agar TP tetap di bawah SL
-            if tp_adj >= sl_adj:
-                sl_adj = _round_tick(current_mark + (gap * 2), tick)
-                tp_adj = _round_tick(current_mark - (gap * 2), tick)
-
-        return sl_adj, tp_adj
+        return sl_adj
 
     cancel_all_open_orders()
 
@@ -826,6 +890,7 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
 
     if actual_pos_amt <= 0.0:
         actual_pos_amt = qty_q
+
     sl_dist = calc_effective_sl_dist(actual_entry, atr_val, mode, side=side, structure_stop_price=structure_stop_price)
     rr = TREND_RR if mode == "TREND" else RANGE_RR
 
@@ -833,13 +898,15 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
         sl_price = actual_entry - sl_dist
         tp_price = actual_entry + (sl_dist * rr)
         op_side = "SELL"
+        tp_limit_price = _round_tick(tp_price - (tick * TP_LIMIT_MAKER_OFFSET_TICKS), tick)
     else:
         sl_price = actual_entry + sl_dist
         tp_price = actual_entry - (sl_dist * rr)
         op_side = "BUY"
+        tp_limit_price = _round_tick(tp_price + (tick * TP_LIMIT_MAKER_OFFSET_TICKS), tick)
 
     current_mark = _safe_get_mark_price(actual_entry)
-    sl_q, tp_q = _sanitize_bracket_prices(side, sl_price, tp_price, current_mark)
+    sl_q = _sanitize_sl_price(side, sl_price, current_mark)
     actual_pos_amt_q = _quantize_step(actual_pos_amt, step)
 
     if actual_pos_amt_q <= 0:
@@ -847,11 +914,12 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
 
     print(
         f"BRACKET DEBUG | side={side} | entry={actual_entry:.8f} | mark={current_mark:.8f} | "
-        f"sl_raw={sl_price:.8f} | tp_raw={tp_price:.8f} | sl={sl_q:.8f} | tp={tp_q:.8f} | "
+        f"sl_raw={sl_price:.8f} | tp_raw={tp_price:.8f} | sl={sl_q:.8f} | tp_limit={tp_limit_price:.8f} | "
         f"qty={actual_pos_amt_q}"
     )
 
     try:
+        # 1. Pasang Stop Loss
         sl_resp = call_with_retry(
             client.futures_create_order,
             symbol=SYMBOL,
@@ -865,18 +933,35 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
             recvWindow=RECV_WINDOW
         )
 
-        tp_resp = call_with_retry(
-            client.futures_create_order,
-            symbol=SYMBOL,
-            side=op_side,
-            type="TAKE_PROFIT_MARKET",
-            stopPrice=tp_q,
-            quantity=actual_pos_amt_q,
-            reduceOnly=True,
-            workingType="MARK_PRICE",
-            priceProtect=True,
-            recvWindow=RECV_WINDOW
-        )
+        # 2. Pasang Take Profit dengan penanganan GTX Fallback
+        try:
+            tp_resp = call_with_retry(
+                client.futures_create_order,
+                symbol=SYMBOL,
+                side=op_side,
+                type="LIMIT",
+                price=tp_limit_price,
+                quantity=actual_pos_amt_q,
+                reduceOnly=True,
+                timeInForce="GTX", # Memaksa jadi Maker
+                recvWindow=RECV_WINDOW
+            )
+        except Exception as e_tp:
+            msg = str(e_tp)
+            # Menangkap error penolakan Post-Only (-2010)
+            if "-2010" in msg or "immediately match" in msg:
+                print("GTX Rejected! Harga terlalu dekat. Mengirim TP Market Darurat...")
+                tp_resp = call_with_retry(
+                    client.futures_create_order,
+                    symbol=SYMBOL,
+                    side=op_side,
+                    type="MARKET",
+                    quantity=actual_pos_amt_q,
+                    reduceOnly=True,
+                    recvWindow=RECV_WINDOW
+                )
+            else:
+                raise e_tp # Lemparkan error jika masalahnya bukan karena GTX
 
         if not _has_valid_order_ref(sl_resp):
             raise RuntimeError(f"SL order gagal / id tidak ada | resp={sl_resp}")
@@ -922,7 +1007,7 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
                     f"🚨 EMERGENCY: Gagal pasang SL/TP. Posisi DITUTUP OTOMATIS!\n"
                     f"Err: {e}\n"
                     f"entryId={entry_resp.get('orderId')}\n"
-                    f"mark={round(current_mark, 8)} | sl={round(sl_q, 8)} | tp={round(tp_q, 8)}"
+                    f"mark={round(current_mark, 8)} | sl={round(sl_q, 8)} | tp={round(tp_price, 8)}"
                 )
             else:
                 send_telegram(
@@ -941,7 +1026,7 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
 
         raise RuntimeError(f"Bracket failed after entry: {e}")
 
-    return actual_entry, actual_pos_amt_q, sl_q, tp_q, sl_dist
+    return actual_entry, actual_pos_amt_q, sl_q, tp_price, sl_dist
 
 
 # =========================
@@ -1049,6 +1134,11 @@ def main():
         "awaiting_pnl_sync": False,
         "pnl_pending_notified": False,
         "next_pnl_recheck_at": None,
+        "tp_price": 0.0,
+        "sl_price": 0.0,
+        "entry_order_side": "",
+        "atr_at_entry": 0.0,
+        "last_tp_manage_ts": 0.0,
     })
 
     def _save_state():
@@ -1096,6 +1186,11 @@ def main():
                     "awaiting_pnl_sync": False,
                     "pnl_pending_notified": False,
                     "next_pnl_recheck_at": None,
+                    "tp_price": 0.0,
+                    "sl_price": 0.0,
+                    "entry_order_side": "",
+                    "atr_at_entry": 0.0,
+                    "last_tp_manage_ts": 0.0,
                 })
                 send_telegram_throttled(
                     "new_day",
@@ -1152,6 +1247,7 @@ def main():
                     st["position_open_ms"] = int(time.time() * 1000)
                 _save_state()
             if st.get("prev_in_position", False) and not in_pos:
+                cancel_all_open_orders()
                 st["awaiting_pnl_sync"] = True
 
             if st.get("awaiting_pnl_sync", False):
@@ -1190,6 +1286,11 @@ def main():
                 st["sl_dist_actual"] = 0.0
                 st["pos_side"] = ""
                 st["qty_q"] = 0.0
+                st["tp_price"] = 0.0
+                st["sl_price"] = 0.0
+                st["entry_order_side"] = ""
+                st["atr_at_entry"] = 0.0
+                st["last_tp_manage_ts"] = 0.0
                 st["awaiting_pnl_sync"] = False
                 st["pnl_pending_notified"] = False
                 st["next_pnl_recheck_at"] = None
@@ -1217,7 +1318,11 @@ def main():
 
             if in_pos:
                 st["prev_in_position"] = True
-                time.sleep(SLEEP_SECONDS)
+                if manage_hybrid_tp_exit(st, now):
+                    _save_state()
+                    time.sleep(1.5)
+                    continue
+                time.sleep(1.5)
                 continue
 
             st["prev_in_position"] = False
@@ -1300,6 +1405,11 @@ def main():
                 st["sl_dist_actual"] = sl_dist_actual
                 st["pos_side"] = "LONG" if side == "BUY" else "SHORT"
                 st["qty_q"] = qty_final
+                st["tp_price"] = tp_final
+                st["sl_price"] = sl_final
+                st["entry_order_side"] = side
+                st["atr_at_entry"] = atr_val
+                st["last_tp_manage_ts"] = 0.0
                 st["position_open_ms"] = int(time.time() * 1000)
                 st["bracket_fail_streak"] = 0
                 st["awaiting_pnl_sync"] = False
