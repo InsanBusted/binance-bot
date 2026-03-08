@@ -31,14 +31,40 @@ from requests.exceptions import ReadTimeout, ConnectionError
 # =========================
 # RETRY WRAPPER
 # =========================
-def call_with_retry(fn, *args, retries: int = 5, base_sleep: float = 1.0, **kwargs):
+# =========================
+# RETRY WRAPPER & RATE LIMITER
+# =========================
+from binance.exceptions import BinanceAPIException
+
+def call_with_retry(fn, *args, retries: int = 5, base_sleep: float = 1.5, **kwargs):
     last_err = None
     for i in range(retries):
         try:
             return fn(*args, **kwargs)
+        except BinanceAPIException as e:
+            last_err = e
+            msg = str(e)
+            
+            # Jika terdeteksi ban atau rate limit dari Binance
+            if getattr(e, "code", None) == -1003 or "banned until" in msg.lower() or "too many requests" in msg.lower():
+                sleep_for = min(120, int(base_sleep * (2 ** i) * 10)) # Tidur agak lama (15s - 120s)
+                print(f"WARN rate limit/bin ban detected. Sleep {sleep_for}s")
+                time.sleep(sleep_for)
+                continue
+
+            if getattr(e, "code", None) in (-1021,):
+                print("WARN timestamp drift, resync time")
+                sync_time_offset()
+                time.sleep(2)
+                continue
+
+            time.sleep(base_sleep * (i + 1))
         except (ReadTimeout, ConnectionError) as e:
             last_err = e
-            time.sleep(base_sleep * (2 ** i) + random.uniform(0, 0.5))
+            time.sleep(base_sleep * (i + 1))
+        except Exception as e:
+            last_err = e
+            time.sleep(base_sleep * (i + 1))
     raise last_err
 
 
@@ -123,10 +149,10 @@ TP_FALLBACK_MAX_PCT = 0.00080
 TP_FALLBACK_COOLDOWN_SECONDS = 45
 
 # anti rate-limit tuning
-IN_POSITION_SLEEP_SECONDS = 6
-TP_MANAGE_MARK_CHECK_COOLDOWN_SECONDS = 8
+IN_POSITION_SLEEP_SECONDS = 10
+TP_MANAGE_MARK_CHECK_COOLDOWN_SECONDS = 12
 
-SLEEP_SECONDS = 10
+SLEEP_SECONDS = 30
 RECV_WINDOW = 10_000
 
 TG_PREFIX = f"{PAIR} V6 HYBRID {'TESTNET' if USE_TESTNET else 'REAL'}"
@@ -436,11 +462,106 @@ def cancel_all_open_orders():
     except Exception as e:
         print("WARN cancel_all_open_orders:", e)
 
+# =========================
+# GLOBAL CACHE SYSTEM
+# =========================
+_cache = {
+    "balance": {"value": 0.0, "ts": 0.0},
+    "position": {"data": (0.0, 0.0, 0.0), "ts": 0.0},
+    "mark_price": {"value": 0.0, "ts": 0.0},
+    "klines": {}
+}
+
+def get_wallet_balance_quote() -> float:
+    now = time.time()
+    # Cache balance selama 45 detik
+    if (now - _cache["balance"]["ts"]) < 45.0:
+        return _cache["balance"]["value"]
+
+    try:
+        bal = call_with_retry(client.futures_account_balance, recvWindow=RECV_WINDOW)
+        val = 0.0
+        for b in bal:
+            if b.get("asset") == QUOTE_ASSET:
+                val = float(b.get("availableBalance", 0.0))
+                break
+        _cache["balance"]["value"] = val
+        _cache["balance"]["ts"] = now
+        return val
+    except Exception as e:
+        print("WARN get_wallet_balance_cached:", e)
+        return _cache["balance"]["value"]
+
+def _get_position_snapshot_cached(ttl: int = 3):
+    now = time.time()
+    if (now - _cache["position"]["ts"]) < ttl:
+        return _cache["position"]["data"]
+
+    try:
+        pos = call_with_retry(client.futures_position_information, symbol=SYMBOL, recvWindow=RECV_WINDOW)
+        if not pos:
+            data = (0.0, 0.0, 0.0)
+        else:
+            p = pos[0]
+            data = (
+                float(p.get("positionAmt", 0.0)),
+                float(p.get("unRealizedProfit", 0.0)),
+                float(p.get("entryPrice", 0.0)),
+            )
+        _cache["position"]["data"] = data
+        _cache["position"]["ts"] = now
+        return data
+    except Exception as e:
+        print("WARN _get_position_snapshot_cached:", e)
+        return _cache["position"]["data"]
+
+# Tiga fungsi di bawah ini sekarang hanya mengambil data dari cache (tidak nembak API baru)
+def get_position_amt() -> float:
+    pos_amt, _, _ = _get_position_snapshot_cached()
+    return pos_amt
+
+def get_position_snapshot():
+    return _get_position_snapshot_cached()
+
+def has_open_position() -> bool:
+    pos_amt, _, _ = _get_position_snapshot_cached()
+    return abs(pos_amt) > 0.0
+
+def get_unrealized_pnl() -> float:
+    _, upnl, _ = _get_position_snapshot_cached()
+    return upnl
+
 def get_mark_price() -> float:
-    mp = call_with_retry(client.futures_mark_price, symbol=SYMBOL)
-    return float(mp["markPrice"])
+    now = time.time()
+    # Cache mark price selama 2.5 detik
+    if _cache["mark_price"]["value"] > 0 and (now - _cache["mark_price"]["ts"]) < 2.5:
+        return _cache["mark_price"]["value"]
+
+    try:
+        mp = call_with_retry(client.futures_mark_price, symbol=SYMBOL)
+        val = float(mp["markPrice"])
+        _cache["mark_price"]["value"] = val
+        _cache["mark_price"]["ts"] = now
+        return val
+    except Exception as e:
+        print("WARN get_mark_price_cached:", e)
+        return _cache["mark_price"]["value"]
+
+def interval_seconds(interval: str) -> int:
+    mp = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "1h": 3600}
+    return mp.get(interval, 300)
 
 def klines_df(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
+    key = f"{symbol}_{interval}_{limit}"
+    now = time.time()
+    
+    # Cache klines: 5m -> valid 60 detik, 15m -> valid 180 detik
+    ttl = max(15, int(interval_seconds(interval) * 0.2)) 
+
+    cached = _cache["klines"].get(key)
+    if cached and (now - cached["ts"]) < ttl:
+        return cached["df"]
+
     raw = call_with_retry(client.futures_klines, symbol=symbol, interval=interval, limit=limit)
     cols = [
         "open_time", "open", "high", "low", "close", "volume",
@@ -452,6 +573,8 @@ def klines_df(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
         df[c] = df[c].astype(float)
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
     df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
+
+    _cache["klines"][key] = {"df": df, "ts": now}
     return df
 
 
