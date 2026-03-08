@@ -501,6 +501,23 @@ def chop(df: pd.DataFrame, length: int = 14) -> pd.Series:
     chop_idx = 100 * np.log10(atr_sum / range_hl) / np.log10(length)
     return chop_idx
 
+def vwap(df: pd.DataFrame) -> pd.Series:
+    # Typical Price = (High + Low + Close) / 3
+    tp = (df["high"] + df["low"] + df["close"]) / 3
+    tp_vol = tp * df["volume"]
+    
+    # Kita buat dataframe sementara untuk menghitung akumulasi harian
+    temp_df = pd.DataFrame({
+        'date': df['open_time'].dt.date,
+        'tp_vol': tp_vol,
+        'volume': df["volume"]
+    })
+    
+    # Menghitung nilai kumulatif (reset setiap berganti hari/tanggal)
+    cum_tp_vol = temp_df.groupby('date')['tp_vol'].cumsum()
+    cum_vol = temp_df.groupby('date')['volume'].cumsum()
+    
+    return cum_tp_vol / cum_vol
 
 # =========================
 # REGIME + BIAS
@@ -553,6 +570,10 @@ def compute_entry_indicators_5m() -> Tuple[pd.DataFrame, dict]:
     df5["atr"] = atr(df5, 14)
     df5["don_hi"] = df5["high"].rolling(DONCHIAN_LEN).max().shift(1)
     df5["don_lo"] = df5["low"].rolling(DONCHIAN_LEN).min().shift(1)
+    
+    # --- TAMBAHKAN BARIS INI ---
+    df5["vwap"] = vwap(df5)
+    # ---------------------------
 
     idx = -2 if USE_CLOSED_CANDLE_ONLY else -1
     last = df5.iloc[idx]
@@ -564,6 +585,9 @@ def compute_entry_indicators_5m() -> Tuple[pd.DataFrame, dict]:
         "atr5": float(last["atr"]),
         "don_hi": float(last["don_hi"]) if pd.notna(last["don_hi"]) else None,
         "don_lo": float(last["don_lo"]) if pd.notna(last["don_lo"]) else None,
+        # --- TAMBAHKAN BARIS INI JUGA ---
+        "vwap": float(last["vwap"]),
+        # --------------------------------
     }
     return df5, dbg
 
@@ -578,6 +602,8 @@ def signal_trend_mode(df5: pd.DataFrame, bias: str) -> Tuple[bool, Optional[str]
     ema_slow_v = float(last["ema_slow"])
     rsiv = float(last["rsi"])
     atrv = float(last["atr"])
+    vwap_v = float(last["vwap"])     # <--- Tambahkan ini
+    close_price = float(last["close"]) # <--- Tambahkan ini agar lebih rapi
 
     if atrv <= 0:
         return False, None, {"reason": "atr_bad"}
@@ -598,6 +624,11 @@ def signal_trend_mode(df5: pd.DataFrame, bias: str) -> Tuple[bool, Optional[str]
     dbg = {"touch": False, "rejection": False, "confirm": False}
 
     if bias == "LONG":
+        # --- TAMBAHKAN FILTER VWAP INI ---
+        if close_price <= vwap_v:
+            return False, None, {"reason": "price_below_vwap", **dbg}
+        # ---------------------------------
+        
         if ema_fast_v <= ema_slow_v:
             return False, None, {"reason": "ema_not_aligned_long", **dbg}
         if rsiv < RSI_TREND_LONG_MIN:
@@ -610,6 +641,16 @@ def signal_trend_mode(df5: pd.DataFrame, bias: str) -> Tuple[bool, Optional[str]
 
         dbg.update({"touch": True, "rejection": True, "confirm": True})
         return True, "BUY", {"reason": "trend_entry", **dbg}
+
+
+    # ====================================================
+    # MULAI BLOK LOGIKA SHORT (SELL)
+    # ====================================================
+
+    # --- TAMBAHKAN FILTER VWAP INI UNTUK SHORT ---
+    if close_price >= vwap_v:
+        return False, None, {"reason": "price_above_vwap", **dbg}
+    # ---------------------------------------------
 
     if ema_fast_v >= ema_slow_v:
         return False, None, {"reason": "ema_not_aligned_short", **dbg}
