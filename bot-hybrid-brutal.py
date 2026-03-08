@@ -768,17 +768,42 @@ def main():
 
     try:
         while True:
-            print(f"[{datetime.now()}] Debug: Loop berputar... Mark Price: {streamer.mark_price}")
             now = datetime.now(timezone.utc)
+            
+            # --- FAILSAFE HARGA ---
+            # Kita coba ambil dari WebSocket dulu (paling cepat)
             current_mark_price = streamer.mark_price
+            
+            # Jika WebSocket macet (0.0), kita paksa ambil lewat REST API
             if current_mark_price <= 0:
                 try:
-                    # Ambil harga manual lewat API REST jika WebSocket macet
-                    current_mark_price = get_mark_price() 
-                except:
+                    current_mark_price = get_mark_price()
+                    # Optional: print agar kamu tahu di log kalau sedang pakai REST
+                    # print(f"[{datetime.now()}] ⚠️ WebSocket Delay, using REST: {current_mark_price}")
+                except Exception as e:
+                    print(f"[{datetime.now()}] 🚨 Fatal: API Error saat ambil harga: {e}")
                     time.sleep(2)
                     continue
-            # ------------------------------
+
+            # Debugging agar kamu bisa pantau di PM2 Logs
+            if int(time.time()) % 10 == 0: # Print setiap 10 detik biar gak spam
+                print(f"[{datetime.now()}] Mode: {st['mode']} | Price: {current_mark_price} | Pos: {st['prev_in_position']}")
+
+            # PENTING: Untuk logika di bawah ini, SELALU gunakan current_mark_price
+            # ==========================================
+            # 1. LOOP SUPER CEPAT (Real-time Break-Even)
+            # ==========================================
+            if st.get("prev_in_position") and current_mark_price > 0:
+                # Sinkronisasi entry_price jika zombie state (harga 0 di state)
+                if float(st.get("entry_price", 0.0)) <= 0:
+                     pos_amt = get_position_amt()
+                     if abs(pos_amt) > 0:
+                         pos_info = call_with_retry(client.futures_position_information, symbol=SYMBOL)
+                         st["entry_price"] = float(pos_info[0].get("entryPrice", current_mark_price))
+                         save_state(st)
+                
+                # Gunakan current_mark_price di sini
+                manage_break_even(st, current_mark_price, tick_size, st.get("qty_q", 0.0))
             
             # ==========================================
             # 1. LOOP SUPER CEPAT (Real-time Break-Even)
