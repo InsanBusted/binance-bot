@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# bot-hypeusdt-v5-hybrid.py
-# HYPEUSDT USD-M Futures - HYBRID Trend + Range
+# bot-multipair-v6-hybrid.py
+# Multi-Pair USD-M Futures - HYBRID Trend + Range
 # Safer execution engine:
 # - Actual entry price after fill
 # - Bracket placement without aggressive open-order verification
@@ -44,7 +44,9 @@ def call_with_retry(fn, *args, retries: int = 5, base_sleep: float = 1.0, **kwar
 # =========================
 # CONFIG
 # =========================
-PAIR = "BCHUSDT"
+
+# SILAKAN GANTI PAIR DI SINI:
+PAIR = "BCHUSDT"  # Ganti dengan "BTCUSDT", "ETHUSDT", atau pair lainnya sesuai kebutuhan
 BASE_ASSET = PAIR[:-4]
 QUOTE_ASSET = PAIR[-4:]
 
@@ -74,9 +76,17 @@ RSI_LEN = 14
 RSI_TREND_LONG_MIN = 52
 RSI_TREND_SHORT_MAX = 48
 TREND_RR = 1.3
-TREND_SL_ATR_MULT = 1.2
-TREND_SL_MIN_PCT = 0.0035
-TREND_SL_MAX_PCT = 0.0150
+TREND_SL_ATR_MULT = 1.8
+TREND_SL_MIN_PCT = 0.0060
+TREND_SL_MAX_PCT = 0.0200
+
+# V6 - structure aware stop loss
+USE_STRUCTURE_SL = True
+SWING_LOOKBACK_BARS = 7
+TREND_SWING_BUFFER_ATR_MULT = 0.25
+RANGE_SWING_BUFFER_ATR_MULT = 0.15
+TREND_STRUCTURE_SL_HARD_MAX_PCT = 0.0300
+RANGE_STRUCTURE_SL_HARD_MAX_PCT = 0.0120
 
 # RANGE entry
 DONCHIAN_LEN = 16
@@ -99,18 +109,23 @@ LOSS_STREAK_LIMIT = 6
 MAX_DAILY_DRAWDOWN_PCT = 0.05
 BRACKET_FAIL_LOCK_LIMIT = 3
 
+# V6 - jangan spam telegram saat close tapi PnL Binance belum muncul
+PNL_FETCH_RETRIES_PER_LOOP = 2
+PNL_FETCH_WAIT_SEC = 1.5
+PNL_RECHECK_DELAY_MINUTES = 7
+
 SLEEP_SECONDS = 10
 RECV_WINDOW = 10_000
 
-TG_PREFIX = f"{PAIR} V5 HYBRID {'TESTNET' if USE_TESTNET else 'REAL'}"
+TG_PREFIX = f"{PAIR} V6 HYBRID {'TESTNET' if USE_TESTNET else 'REAL'}"
 
 state_mode = "testnet" if USE_TESTNET else "real"
-STATE_FILE = Path(f".state_{PAIR.lower()}_v5_hybrid_{state_mode}.json")
+STATE_FILE = Path(f".state_{PAIR.lower()}_v6_hybrid_{state_mode}.json")
 
 LOG_DIR = Path(__file__).resolve().parent / "logs"
-LOOP_LOG = LOG_DIR / f"loop_{PAIR.lower()}_v5.csv"
-TRADES_LOG = LOG_DIR / f"trades_{PAIR.lower()}_v5.csv"
-DAILY_LOG = LOG_DIR / f"daily_{PAIR.lower()}_v5.csv"
+LOOP_LOG = LOG_DIR / f"loop_{PAIR.lower()}_v6.csv"
+TRADES_LOG = LOG_DIR / f"trades_{PAIR.lower()}_v6.csv"
+DAILY_LOG = LOG_DIR / f"daily_{PAIR.lower()}_v6.csv"
 
 
 # =========================
@@ -643,22 +658,76 @@ def calc_sl_dist(price: float, atr_val: float, mode: str) -> float:
 
     return max(sl_min, min(raw_sl_dist, sl_max))
 
+def _recent_structure_window(df5: pd.DataFrame) -> pd.DataFrame:
+    if df5 is None or df5.empty:
+        return pd.DataFrame()
+
+    if USE_CLOSED_CANDLE_ONLY:
+        start = max(0, len(df5) - (SWING_LOOKBACK_BARS + 1))
+        end = len(df5) - 1
+        return df5.iloc[start:end].copy()
+
+    return df5.iloc[max(0, len(df5) - SWING_LOOKBACK_BARS):].copy()
+
+def get_structure_stop_price(side: str, df5: pd.DataFrame, atr_val: float, mode: str) -> Optional[float]:
+    if (not USE_STRUCTURE_SL) or df5 is None or atr_val <= 0:
+        return None
+
+    recent = _recent_structure_window(df5)
+    if recent.empty:
+        return None
+
+    buffer = atr_val * (TREND_SWING_BUFFER_ATR_MULT if mode == "TREND" else RANGE_SWING_BUFFER_ATR_MULT)
+
+    if side == "BUY":
+        return float(recent["low"].min()) - buffer
+    if side == "SELL":
+        return float(recent["high"].max()) + buffer
+    return None
+
+def calc_effective_sl_dist(price: float, atr_val: float, mode: str, side: Optional[str] = None, structure_stop_price: Optional[float] = None) -> float:
+    sl_dist = calc_sl_dist(price, atr_val, mode)
+
+    if (not USE_STRUCTURE_SL) or side not in ("BUY", "SELL") or structure_stop_price is None:
+        return sl_dist
+
+    if side == "BUY" and structure_stop_price < price:
+        structure_dist = price - structure_stop_price
+    elif side == "SELL" and structure_stop_price > price:
+        structure_dist = structure_stop_price - price
+    else:
+        structure_dist = 0.0
+
+    if structure_dist <= 0:
+        return sl_dist
+
+    hard_max_pct = TREND_STRUCTURE_SL_HARD_MAX_PCT if mode == "TREND" else RANGE_STRUCTURE_SL_HARD_MAX_PCT
+    structure_dist = min(structure_dist, price * hard_max_pct)
+    return max(sl_dist, structure_dist)
+
+# REVISI PENTING: Kalkulasi ulang risk_usd jika qty dipotong oleh limit max_notional
 def calc_qty_from_risk(equity: float, price: float, sl_dist: float) -> Tuple[float, float, float]:
-    risk_usd = equity * RISK_PCT
+    target_risk_usd = equity * RISK_PCT
     if sl_dist <= 0:
         return 0.0, 0.0, 0.0
 
-    qty = risk_usd / sl_dist
+    qty = target_risk_usd / sl_dist
 
     max_notional = equity * LEVERAGE * MAX_NOTIONAL_FRACTION_OF_EQUITY
     approx_notional = qty * price
+    
     if max_notional > 0 and approx_notional > max_notional:
         qty = max_notional / price
         approx_notional = qty * price
+        
+        # Risk aktual menyesuaikan qty yang terpotong max_notional
+        actual_risk_usd = qty * sl_dist 
+    else:
+        actual_risk_usd = target_risk_usd
 
-    return qty, risk_usd, approx_notional
+    return qty, actual_risk_usd, approx_notional
 
-def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mode: str, mark_price: float):
+def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mode: str, mark_price: float, structure_stop_price: Optional[float] = None):
     filters = _get_symbol_filters(SYMBOL)
     tick = float(filters["PRICE_FILTER"]["tickSize"])
     step = float(filters["LOT_SIZE"]["stepSize"])
@@ -679,11 +748,6 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
             return float(fallback_price)
 
     def _sanitize_bracket_prices(side_: str, sl_raw: float, tp_raw: float, current_mark: float):
-        """
-        Cegah STOP/TP langsung trigger saat pakai workingType=MARK_PRICE.
-        BUY  = posisi long  -> SL harus di bawah mark, TP harus di atas mark
-        SELL = posisi short -> SL harus di atas mark, TP harus di bawah mark
-        """
         min_gap_ticks = 3
         gap = tick * min_gap_ticks
 
@@ -762,8 +826,7 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
 
     if actual_pos_amt <= 0.0:
         actual_pos_amt = qty_q
-
-    sl_dist = calc_sl_dist(actual_entry, atr_val, mode)
+    sl_dist = calc_effective_sl_dist(actual_entry, atr_val, mode, side=side, structure_stop_price=structure_stop_price)
     rr = TREND_RR if mode == "TREND" else RANGE_RR
 
     if side == "BUY":
@@ -950,7 +1013,7 @@ def main():
 
     print("MinNotional:", min_notional)
     mode_label = "TESTNET" if USE_TESTNET else "REAL"
-    print(f"{SYMBOL} V5 HYBRID START ({mode_label}) | Lev:{LEVERAGE} | Regime:{TF_REGIME} ADX{ADX_LEN} | Entry:{TF_ENTRY}")
+    print(f"{SYMBOL} V6 HYBRID START ({mode_label}) | Lev:{LEVERAGE} | Regime:{TF_REGIME} ADX{ADX_LEN} | Entry:{TF_ENTRY}")
 
     send_telegram_throttled(
         "startup",
@@ -983,6 +1046,9 @@ def main():
         "pos_side": "",
         "qty_q": 0.0,
         "bracket_fail_streak": 0,
+        "awaiting_pnl_sync": False,
+        "pnl_pending_notified": False,
+        "next_pnl_recheck_at": None,
     })
 
     def _save_state():
@@ -1027,6 +1093,9 @@ def main():
                     "pos_side": "",
                     "qty_q": 0.0,
                     "bracket_fail_streak": 0,
+                    "awaiting_pnl_sync": False,
+                    "pnl_pending_notified": False,
+                    "next_pnl_recheck_at": None,
                 })
                 send_telegram_throttled(
                     "new_day",
@@ -1082,19 +1151,32 @@ def main():
                 if not st.get("position_open_ms"):
                     st["position_open_ms"] = int(time.time() * 1000)
                 _save_state()
-
             if st.get("prev_in_position", False) and not in_pos:
-                pnl_start_ms = int(st.get("position_open_ms", 0)) or int(st.get("last_pnl_check_ms", 0))
+                st["awaiting_pnl_sync"] = True
 
+            if st.get("awaiting_pnl_sync", False):
+                next_pnl_recheck_at = _iso_to_dt(st.get("next_pnl_recheck_at"))
+                if next_pnl_recheck_at and now < next_pnl_recheck_at:
+                    time.sleep(SLEEP_SECONDS)
+                    continue
+
+                pnl_start_ms = int(st.get("position_open_ms", 0)) or int(st.get("last_pnl_check_ms", 0))
                 pnl, got_any = get_closed_trade_pnl_with_retry(
                     pnl_start_ms,
                     st["seen_tran_ids"],
-                    retries=5,
-                    wait_sec=2.0
+                    retries=PNL_FETCH_RETRIES_PER_LOOP,
+                    wait_sec=PNL_FETCH_WAIT_SEC
                 )
 
                 if not got_any:
-                    send_telegram("⚠️ Posisi tertutup, tapi data PnL Binance belum terbaca. Bot akan cek lagi di loop berikutnya.")
+                    if not st.get("pnl_pending_notified", False):
+                        send_telegram(
+                            f"⚠️ Posisi {SYMBOL} sudah tertutup, tapi data PnL Binance belum terbaca. "
+                            f"Bot akan cek ulang sekitar {PNL_RECHECK_DELAY_MINUTES} menit lagi."
+                        )
+                        st["pnl_pending_notified"] = True
+
+                    st["next_pnl_recheck_at"] = _dt_to_iso(now + pd.Timedelta(minutes=PNL_RECHECK_DELAY_MINUTES))
                     _save_state()
                     time.sleep(SLEEP_SECONDS)
                     continue
@@ -1108,6 +1190,9 @@ def main():
                 st["sl_dist_actual"] = 0.0
                 st["pos_side"] = ""
                 st["qty_q"] = 0.0
+                st["awaiting_pnl_sync"] = False
+                st["pnl_pending_notified"] = False
+                st["next_pnl_recheck_at"] = None
 
                 log_trade_close(now, pnl, st["loss_streak"], st["trades_today"], st["daily_realized_pnl"])
 
@@ -1172,8 +1257,8 @@ def main():
             if atr_val <= 0:
                 time.sleep(SLEEP_SECONDS)
                 continue
-
-            sl_dist_est = calc_sl_dist(price, atr_val, st["mode"])
+            structure_stop_price = get_structure_stop_price(side, df5, atr_val, st["mode"])
+            sl_dist_est = calc_effective_sl_dist(price, atr_val, st["mode"], side=side, structure_stop_price=structure_stop_price)
             qty, risk_usd, _ = calc_qty_from_risk(equity_now, price, sl_dist_est)
 
             filters = _get_symbol_filters(SYMBOL)
@@ -1205,7 +1290,8 @@ def main():
                     qty_q=qty_q,
                     atr_val=atr_val,
                     mode=st["mode"],
-                    mark_price=price
+                    mark_price=price,
+                    structure_stop_price=structure_stop_price
                 )
 
                 st["trades_today"] = int(st.get("trades_today", 0)) + 1
@@ -1216,6 +1302,9 @@ def main():
                 st["qty_q"] = qty_final
                 st["position_open_ms"] = int(time.time() * 1000)
                 st["bracket_fail_streak"] = 0
+                st["awaiting_pnl_sync"] = False
+                st["pnl_pending_notified"] = False
+                st["next_pnl_recheck_at"] = None
                 _save_state()
 
                 send_telegram(
