@@ -42,13 +42,20 @@ class BinanceStreamer:
         print(f"🟢 WebSocket Stream Started for {self.symbol}...")
 
     def handle_mark_price(self, msg):
-        if msg['e'] == 'markPriceUpdate':
-            self.mark_price = float(msg['p'])
+        # Tambahkan pengecekan agar tidak error jika 'e' tidak ada
+        if msg and isinstance(msg, dict) and 'e' in msg:
+            if msg['e'] == 'markPriceUpdate':
+                self.mark_price = float(msg['p'])
+        else:
+            # Ini biasanya pesan koneksi (ping/pong), abaikan saja
+            pass
 
     def handle_kline(self, msg):
-        if msg['e'] == 'kline':
-            if msg['k']['x']:  # Jika 'x' True, artinya candle baru saja tutup
-                self.candle_closed = True
+        # Tambahkan pengecekan yang sama di sini
+        if msg and isinstance(msg, dict) and 'e' in msg:
+            if msg['e'] == 'kline':
+                if msg['k']['x']:  # Jika 'x' True, artinya candle baru saja tutup
+                    self.candle_closed = True
 
     def stop(self):
         self.twm.stop()
