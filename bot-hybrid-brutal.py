@@ -730,10 +730,11 @@ def main():
     min_notional = get_min_notional(SYMBOL)
     tick_size = float(_get_symbol_filters(SYMBOL)["PRICE_FILTER"]["tickSize"])
 
+    # --- INISIALISASI AWAL ---
     send_telegram(
         f"🟢 {TG_PREFIX} started\n"
         f"Eq: ${get_wallet_balance_quote():.2f}\n"
-        f"Mode: Sniper Triple EMA Scalper + CHOP + WebSocket"
+        f"Mode: Ultimate Sniper {SYMBOL} + Vol Regime + WebSocket"
     )
 
     st = load_state({
@@ -748,10 +749,13 @@ def main():
         "force_test_done": False, "margin_trap_alert_sent": False,
     })
 
+    # Variabel Kontrol Loop
     last_time_sync = time.time()
     last_rest_check = 0
+    last_health_check = time.time()
     TIME_SYNC_EVERY_S = 30 * 60
-    REST_INTERVAL = 3.0  # Cek API lambat setiap 3 detik
+    REST_INTERVAL = 3.0  
+    HEALTH_CHECK_S = 1800 # 30 Menit
 
     # NYALAKAN WEBSOCKET
     streamer = BinanceStreamer(
@@ -767,15 +771,39 @@ def main():
             now = datetime.now(timezone.utc)
             current_mark_price = streamer.mark_price
 
+            # ==========================================
             # 1. LOOP SUPER CEPAT (Real-time Break-Even)
+            # ==========================================
             if st.get("prev_in_position") and current_mark_price > 0:
+                # Failsafe: Jika state mencatat in_position tapi entry_price 0, sinkronkan ulang
+                if float(st.get("entry_price", 0.0)) <= 0:
+                     pos_amt = get_position_amt()
+                     if abs(pos_amt) > 0:
+                         # Ambil entry price langsung dari API Binance (REST)
+                         pos_info = call_with_retry(client.futures_position_information, symbol=SYMBOL)
+                         st["entry_price"] = float(pos_info[0].get("entryPrice", current_mark_price))
+                         save_state(st)
+                
                 manage_break_even(st, current_mark_price, tick_size, st.get("qty_q", 0.0))
 
+            # ==========================================
             # 2. LOOP MENENGAH (Cek Status Posisi & Saldo)
+            # ==========================================
             if time.time() - last_rest_check >= REST_INTERVAL:
                 last_rest_check = time.time()
+                
                 if (time.time() - last_time_sync) >= TIME_SYNC_EVERY_S:
                     if sync_time_offset(): last_time_sync = time.time()
+
+                # --- HEALTH CHECK TELEGRAM ---
+                if time.time() - last_health_check >= HEALTH_CHECK_S:
+                    last_health_check = time.time()
+                    eq_check = get_wallet_balance_quote()
+                    send_telegram(
+                        f"🤖 {SYMBOL} Health Check\n"
+                        f"Equity: ${eq_check:.2f} | PnL Day: ${st['daily_realized_pnl']:.2f}\n"
+                        f"Trades: {st['trades_today']} | Status: {'🟢 In Pos' if st['prev_in_position'] else '⚪ Idle'}"
+                    )
 
                 cur_day = now.date().isoformat()
                 if cur_day != st.get("day_key"):
@@ -792,34 +820,39 @@ def main():
                 pos_amt = get_position_amt()
                 in_pos = abs(pos_amt) > 0
 
+                # Logika: Sinkronisasi State vs Realita Binance (Anti-Zombie)
                 if in_pos and not st.get("prev_in_position"):
                     st["prev_in_position"] = True
-                    if not st.get("position_open_ms"): st["position_open_ms"] = int(time.time() * 1000)
-                    if float(st.get("entry_price", 0.0)) <= 0 and current_mark_price > 0:
-                        st["entry_price"] = current_mark_price
+                    st["position_open_ms"] = int(time.time() * 1000)
                     save_state(st)
-
-                elif st.get("prev_in_position") and not in_pos:
+                
+                elif not in_pos and st.get("prev_in_position"):
+                    # Jika realita tidak ada posisi tapi state mencatat ada, anggap trade sudah tutup
                     pnl_start_ms = int(st.get("position_open_ms", 0)) or int(st.get("last_pnl_check_ms", 0))
                     pnl, got_any = get_closed_trade_pnl_with_retry(pnl_start_ms, st["seen_tran_ids"], retries=3, wait_sec=2)
+                    
+                    st["last_pnl_check_ms"] = int(time.time() * 1000)
                     if got_any:
-                        st["last_pnl_check_ms"] = int(time.time() * 1000)
                         st["daily_realized_pnl"] = float(st.get("daily_realized_pnl", 0.0)) + pnl
                         st["loss_streak"] = int(st.get("loss_streak", 0)) + 1 if pnl < 0 else 0
-                        st.update({
-                            "entry_price": 0.0, "sl_dist_actual": 0.0, "pos_side": "",
-                            "be_activated": False, "be_failed_once": False, "qty_q": 0.0,
-                            "position_open_ms": 0, "prev_in_position": False
-                        })
                         send_telegram(f"✅ {SYMBOL} Trade Closed | PnL: ${pnl:.4f} | Streak: {st['loss_streak']}")
-                        if st["loss_streak"] >= LOSS_STREAK_LIMIT:
-                            st["daily_locked"] = True
-                            send_telegram(f"🧯 {SYMBOL} LOSS STREAK LIMIT! Locked until tomorrow.")
-                        else:
-                            st["cooldown_until"] = _dt_to_iso(now + pd.Timedelta(minutes=COOLDOWN_MINUTES))
-                        save_state(st)
+                    
+                    st.update({
+                        "entry_price": 0.0, "sl_dist_actual": 0.0, "pos_side": "",
+                        "be_activated": False, "be_failed_once": False, "qty_q": 0.0,
+                        "position_open_ms": 0, "prev_in_position": False
+                    })
+                    
+                    if st["loss_streak"] >= LOSS_STREAK_LIMIT:
+                        st["daily_locked"] = True
+                        send_telegram(f"🧯 {SYMBOL} LOSS STREAK LIMIT! Locked until tomorrow.")
+                    else:
+                        st["cooldown_until"] = _dt_to_iso(now + pd.Timedelta(minutes=COOLDOWN_MINUTES))
+                    save_state(st)
 
+            # ==========================================
             # 3. LOOP ENTRY (HANYA SAAT CANDLE TUTUP)
+            # ==========================================
             if streamer.candle_closed:
                 streamer.candle_closed = False
                 
@@ -844,6 +877,7 @@ def main():
                 cdt = _iso_to_dt(st.get("cooldown_until"))
                 if cdt and now < cdt: continue
 
+                # ANALISA PASAR
                 st["mode"], bias, chop15, df15 = compute_regime_and_bias(st.get("mode", "RANGE"))
                 vol_regime, atrp, low_th, high_th = get_vol_regime_15m(df15)
                 df5, dbg5 = compute_entry_indicators_5m()
@@ -853,6 +887,7 @@ def main():
                 last_closed = _last_closed(df5)
                 price = current_mark_price if current_mark_price > 0 else float(last_closed["close"])
 
+                # Logika Force Test Entry
                 if FORCE_TEST_ENTRY and not st.get("force_test_done", False):
                     step_size = float(_get_symbol_filters(SYMBOL)["LOT_SIZE"]["stepSize"])
                     qty_q = _quantize_step((min_notional * 1.1) / price, step_size)
@@ -949,6 +984,6 @@ def main():
         traceback.print_exc()
     finally:
         streamer.stop()
-
+        
 if __name__ == "__main__":
     main()
