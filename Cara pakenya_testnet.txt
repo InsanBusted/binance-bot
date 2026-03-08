@@ -34,7 +34,7 @@ buat matiin pm2
 	
 Buat baru pm2
 	"source venv/bin/activate"
-	pm2 start bot-btcusdc-v4-hybrid2.py --name bot-hype --interpreter python3
+	pm2 start bot-Multipair-v6.1-fix-hybrid.py --name bot-multipai-v6.1 --interpreter python3
 	"pm2 start ./venv/bin/python3 --name bot-eth-pullback -- bot-eth-scalp.py"
 	"pm2 startup"
 	"pm2 save"
