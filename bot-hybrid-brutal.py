@@ -771,7 +771,15 @@ def main():
             print(f"[{datetime.now()}] Debug: Loop berputar... Mark Price: {streamer.mark_price}")
             now = datetime.now(timezone.utc)
             current_mark_price = streamer.mark_price
-
+            if current_mark_price <= 0:
+                try:
+                    # Ambil harga manual lewat API REST jika WebSocket macet
+                    current_mark_price = get_mark_price() 
+                except:
+                    time.sleep(2)
+                    continue
+            # ------------------------------
+            
             # ==========================================
             # 1. LOOP SUPER CEPAT (Real-time Break-Even)
             # ==========================================
