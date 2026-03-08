@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# bot-hybrid-multipair-v9.7.3.py
-# ETHUSDC USD-M Futures - HYBRID Trend & Range
-# V9.7.3: FINAL TESTNET READY, Adaptive Risk, Stable Emergency Close, Atomic State
+# bot-hybrid-brutal.py
+# MULTIPAIR USD-M Futures - HYBRID Trend & Range
+# V2: FINAL TESTNET READY, Adaptive Risk, Stable Emergency Close, Atomic State
 
 import os
 import time
@@ -21,15 +21,15 @@ from requests.exceptions import ReadTimeout, ConnectionError
 
 # =========================
 # TESTNET FORCE ENTRY MODE
-# ========================= 
-FORCE_TEST_ENTRY = False  # DI-MATIKAN SESUAI PRIORITAS
+# =========================
+FORCE_TEST_ENTRY = False
 FORCE_TEST_SIDE = "BUY"
 
 # =========================
 # CONFIGURASI BOT & MODAL
 # =========================
-SYMBOL = "BTCUSDT"           
-LEVERAGE = 25              # Naikkan leverage untuk memperbesar notional size
+SYMBOL = "BTCUSDT"
+LEVERAGE = 25
 TF_REGIME = "15m"
 TF_ENTRY = "5m"
 TAKER_FEE_PCT = 0.0005
@@ -39,23 +39,24 @@ def get_quote_asset(symbol: str) -> str:
         if symbol.endswith(q):
             return q
     raise ValueError(f"Quote asset tidak dikenali dari symbol: {symbol}")
+
 QUOTE_ASSET = get_quote_asset(SYMBOL)
 SYMBOL_TAG = SYMBOL.lower()
 
 # Parameter Aggressive Small Account
-RISK_PCT = 0.05            # Resiko dinaikkan jadi 5% dari equity per trade (Sangat agresif!)
-MAX_FORCED_RISK_PCT = 0.15 # Max resiko dinaikkan agar bot tetap hajar saat volatilitas tinggi
-MAX_DAILY_DRAWDOWN_PCT = 0.40 # Toleransi minus harian sampai 40% sebelum bot berhenti
-MAX_MARGIN_FRACTION = 0.95 # Pakai margin nyaris maksimal
+RISK_PCT = 0.05
+MAX_FORCED_RISK_PCT = 0.15
+MAX_DAILY_DRAWDOWN_PCT = 0.40
+MAX_MARGIN_FRACTION = 0.95
 
 # VOLATILITY ADAPTIVE RISK
 LOW_VOL_RISK_MULT = 1.00
 NORMAL_VOL_RISK_MULT = 1.25
-HIGH_VOL_RISK_MULT = 0.90  # Tetap agak rem sedikit di high vol agar tidak langsung liquid
+HIGH_VOL_RISK_MULT = 0.90
 
 # TRADE MANAGEMENT
 ENABLE_BREAK_EVEN = True
-BE_ACTIVATION_RR = 1.5     # Jangan digeser ke BE sebelum profit setidaknya 1.5x resiko (Beri napas!)
+BE_ACTIVATION_RR = 1.5
 BE_BUFFER_PCT = 0.0003
 
 # VOLATILITY REGIME FILTER
@@ -63,8 +64,8 @@ VOL_ATR_LEN_15M = 14
 VOL_LOOKBACK_15M = 48
 VOL_LOW_MULT = 0.70
 VOL_HIGH_MULT = 1.45
-HIGH_VOL_WIDEN_SL_MULT = 1.25 # SL dilebarkan sedikit saat volatile supaya tidak mudah tersapu sumbu (wick)
-HIGH_VOL_TP_MULT = 1.50       # TP makin dijauhkan saat volatilitas tinggi!
+HIGH_VOL_WIDEN_SL_MULT = 1.25
+HIGH_VOL_TP_MULT = 1.50
 
 # SNIPER PARAMETERS
 ADX_LEN = 14
@@ -82,8 +83,8 @@ EMA_SLOW = 19
 RSI_LEN = 12
 RSI_TREND_LONG_MIN = 46
 RSI_TREND_SHORT_MAX = 54
-TREND_RR = 2.0             # 🔥 INCAR TP 4x LIPAT DARI SL DI MODE TREND (Super Brutal)
-TREND_SL_ATR_MULT = 1.7    # SL dijauhkan sedikit supaya bisa hold posisi lebih lama
+TREND_RR = 2.0
+TREND_SL_ATR_MULT = 1.7
 TREND_SL_MIN_PCT = 0.0050
 TREND_SL_MAX_PCT = 0.0150
 PULLBACK_ATR_TOL = 0.28
@@ -93,16 +94,16 @@ TREND_CONFIRM_ATR_TOL = 0.16
 DONCHIAN_LEN = 14
 RSI_RANGE_LONG_MIN = 42
 RSI_RANGE_SHORT_MAX = 58
-RANGE_RR = 2.5             # 🔥 INCAR TP 2.5x LIPAT DI MODE SIDEWAYS
+RANGE_RR = 2.5
 RANGE_SL_ATR_MULT = 2.0
 RANGE_SL_MIN_PCT = 0.0040
 RANGE_SL_MAX_PCT = 0.0120
 VOL_OK_RATIO_RANGE = 0.38
 DONCHIAN_ATR_TOL = 0.28
 
-MAX_TRADES_PER_DAY = 100   # Gaspol hajar terus
-COOLDOWN_MINUTES = 1       # Cooldown dipendekkan agar langsung sikat sinyal berikutnya
-LOSS_STREAK_LIMIT = 15     # 🔥 WAJIB NAIK: High RR pasti sering SL beruntun. Jangan kunci bot terlalu cepat.
+MAX_TRADES_PER_DAY = 100
+COOLDOWN_MINUTES = 1
+LOSS_STREAK_LIMIT = 15
 
 SLEEP_SLOW = 6
 SLEEP_FAST = 2
@@ -111,7 +112,7 @@ RECV_WINDOW = 10_000
 TG_PREFIX = f"{SYMBOL} V9.7.3 TESTNET"
 STATE_FILE = Path(f".state_{SYMBOL_TAG}_v9_testnet.json")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
-LOOP_LOG = LOG_DIR / f"loop_{SYMBOL_TAG}_testnet.csv"          
+LOOP_LOG = LOG_DIR / f"loop_{SYMBOL_TAG}_testnet.csv"
 
 # =========================
 # FUNGSI DASAR & STATE
@@ -119,21 +120,29 @@ LOOP_LOG = LOG_DIR / f"loop_{SYMBOL_TAG}_testnet.csv"
 def call_with_retry(fn, *args, retries=5, base_sleep=1.0, **kwargs):
     last_err = None
     for i in range(retries):
-        try: return fn(*args, **kwargs)
+        try:
+            return fn(*args, **kwargs)
         except (ReadTimeout, ConnectionError) as e:
             last_err = e
             time.sleep(base_sleep * (2 ** i) + random.uniform(0, 0.5))
     raise last_err
 
-def _dt_to_iso(dt): return dt.isoformat() if dt else None
+def _dt_to_iso(dt):
+    return dt.isoformat() if dt else None
+
 def _iso_to_dt(s):
-    try: return datetime.fromisoformat(s) if s else None
-    except: return None
+    try:
+        return datetime.fromisoformat(s) if s else None
+    except:
+        return None
 
 def load_state(defaults):
     try:
-        if STATE_FILE.exists(): defaults.update(json.loads(STATE_FILE.read_text()))
-    except: pass
+        if STATE_FILE.exists():
+            defaults.update(json.loads(STATE_FILE.read_text()))
+    except:
+        pass
+
     if "seen_tran_ids" in defaults and isinstance(defaults["seen_tran_ids"], list):
         defaults["seen_tran_ids"] = set(defaults["seen_tran_ids"])
     return defaults
@@ -141,70 +150,110 @@ def load_state(defaults):
 def save_state(state):
     try:
         st_copy = state.copy()
-        if "seen_tran_ids" in st_copy: st_copy["seen_tran_ids"] = list(st_copy["seen_tran_ids"])
-        
-        # Atomic write
+        if "seen_tran_ids" in st_copy:
+            st_copy["seen_tran_ids"] = list(st_copy["seen_tran_ids"])
+
         temp_file = STATE_FILE.with_suffix('.tmp')
         temp_file.write_text(json.dumps(st_copy, indent=2, sort_keys=True))
         temp_file.replace(STATE_FILE)
-    except Exception as e: 
+    except Exception as e:
         print(f"Gagal save state: {e}")
 
 def log_loop(now, equity, mode, bias, active_bias, reason, dbg):
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     new_file = not LOOP_LOG.exists()
-    row = {"ts": now.isoformat(), "equity": round(equity, 2), "mode": mode, "bias": bias, "active_bias": active_bias, "reason": reason}
-    for k, v in dbg.items(): row[k] = round(v, 6) if isinstance(v, float) else v
-    header = ["ts","equity","mode","bias","active_bias","reason","price","adx15","ema9","ema21","rsi5","atr5","vol","vol_sma","don_hi","don_lo","vol_regime","atr_pct15","atrp_low","atrp_high"]
+    row = {
+        "ts": now.isoformat(),
+        "equity": round(equity, 2),
+        "mode": mode,
+        "bias": bias,
+        "active_bias": active_bias,
+        "reason": reason
+    }
+    for k, v in dbg.items():
+        row[k] = round(v, 6) if isinstance(v, float) else v
+
+    header = [
+        "ts", "equity", "mode", "bias", "active_bias", "reason",
+        "price", "adx15", "ema9", "ema21", "rsi5", "atr5",
+        "vol", "vol_sma", "don_hi", "don_lo", "vol_regime",
+        "atr_pct15", "atrp_low", "atrp_high"
+    ]
+
     with LOOP_LOG.open("a", newline="") as f:
         w = csv.DictWriter(f, fieldnames=header, extrasaction="ignore")
-        if new_file: w.writeheader()
+        if new_file:
+            w.writeheader()
         w.writerow(row)
 
 # =========================
 # SETUP BINANCE TESTNET
 # =========================
 load_dotenv(dotenv_path=".env")
-client = Client(os.getenv("BINANCE_TESTNET_API_KEY"), os.getenv("BINANCE_TESTNET_API_SECRET"), testnet=True)
+client = Client(
+    os.getenv("BINANCE_TESTNET_API_KEY"),
+    os.getenv("BINANCE_TESTNET_API_SECRET"),
+    testnet=True
+)
 client.REQUEST_TIMEOUT = 60
 
 def sync_time_offset():
     try:
         client.timestamp_offset = call_with_retry(client.futures_time)["serverTime"] - int(time.time() * 1000)
         return True
-    except: return False
+    except:
+        return False
+
 sync_time_offset()
 
 def send_telegram(msg: str):
-    token, chat_id = os.getenv("TELEGRAM_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
+    token = os.getenv("TELEGRAM_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if token and chat_id:
-        try: requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id": chat_id, "text": msg}, timeout=8)
-        except: pass
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": msg},
+                timeout=8
+            )
+        except:
+            pass
 
 # =========================
 # HELPERS API BINANCE
 # =========================
 _exchange_cache = {}
+
 def _get_symbol_filters(symbol):
-    if not _exchange_cache.get("info"): _exchange_cache["info"] = call_with_retry(client.futures_exchange_info)
+    if not _exchange_cache.get("info"):
+        _exchange_cache["info"] = call_with_retry(client.futures_exchange_info)
     for s in _exchange_cache["info"]["symbols"]:
-        if s["symbol"] == symbol: return {f["filterType"]: f for f in s["filters"]}
+        if s["symbol"] == symbol:
+            return {f["filterType"]: f for f in s["filters"]}
     raise RuntimeError("Symbol not found")
 
 def get_min_notional(symbol):
     try:
         f = _get_symbol_filters(symbol)
-        if "MIN_NOTIONAL" in f: return float(f["MIN_NOTIONAL"].get("notional", 100))
-    except: pass
+        if "MIN_NOTIONAL" in f:
+            return float(f["MIN_NOTIONAL"].get("notional", 100))
+    except:
+        pass
     return 100.0
 
 def _quantize_step(value, step):
-    if step == 0: return float(value)
-    return float((Decimal(str(value)) / Decimal(str(step))).to_integral_value(rounding=ROUND_DOWN) * Decimal(str(step)))
+    if step == 0:
+        return float(value)
+    return float(
+        (Decimal(str(value)) / Decimal(str(step))).to_integral_value(rounding=ROUND_DOWN) * Decimal(str(step))
+    )
 
 def _round_tick(value, tick):
-    if tick == 0: return float(value)
-    return float((Decimal(str(value)) / Decimal(str(tick))).to_integral_value(rounding=ROUND_DOWN) * Decimal(str(tick)))
+    if tick == 0:
+        return float(value)
+    return float(
+        (Decimal(str(value)) / Decimal(str(tick))).to_integral_value(rounding=ROUND_DOWN) * Decimal(str(tick))
+    )
 
 def get_wallet_balance_quote():
     try:
@@ -217,13 +266,17 @@ def get_wallet_balance_quote():
         return 0.0
 
 def get_position_amt():
-    try: pos = call_with_retry(client.futures_position_information, symbol=SYMBOL, recvWindow=RECV_WINDOW)
-    except: return 0.0
+    try:
+        pos = call_with_retry(client.futures_position_information, symbol=SYMBOL, recvWindow=RECV_WINDOW)
+    except:
+        return 0.0
     return float(pos[0].get("positionAmt", 0.0)) if pos else 0.0
 
 def get_unrealized_pnl():
-    try: pos = call_with_retry(client.futures_position_information, symbol=SYMBOL, recvWindow=RECV_WINDOW)
-    except: return 0.0
+    try:
+        pos = call_with_retry(client.futures_position_information, symbol=SYMBOL, recvWindow=RECV_WINDOW)
+    except:
+        return 0.0
     return float(pos[0].get("unRealizedProfit", 0.0)) if pos else 0.0
 
 def realized_pnl_since(start_ms, seen_tran_ids):
@@ -254,7 +307,6 @@ def realized_pnl_since(start_ms, seen_tran_ids):
             seen_tran_ids.add(tid)
 
         return total, len(new_seen) > 0
-
     except:
         return 0.0, False
 
@@ -262,50 +314,91 @@ def get_closed_trade_pnl_with_retry(start_ms, seen_tran_ids, retries=5, wait_sec
     total_pnl = 0.0
     got_any = False
 
-    for i in range(retries):
+    for _ in range(retries):
         pnl, found = realized_pnl_since(start_ms, seen_tran_ids)
         if found:
             total_pnl += pnl
             got_any = True
+            
+            # FIXED: Beri jeda 1.5 detik ekstra untuk menangkap komisi yang telat masuk dari Binance API.
+            # Jika langsung di-break, fee trading sering tidak terhitung dan merusak akumulasi harian.
+            time.sleep(1.5)
+            extra_pnl, _ = realized_pnl_since(start_ms, seen_tran_ids)
+            total_pnl += extra_pnl
             break
-
+            
         time.sleep(wait_sec)
 
     return total_pnl, got_any
-    
-def cancel_all_open_orders():
-    try: call_with_retry(client.futures_cancel_all_open_orders, symbol=SYMBOL, recvWindow=RECV_WINDOW)
-    except: pass
 
-def get_mark_price(): return float(call_with_retry(client.futures_mark_price, symbol=SYMBOL)["markPrice"])
+def cancel_all_open_orders():
+    try:
+        call_with_retry(client.futures_cancel_all_open_orders, symbol=SYMBOL, recvWindow=RECV_WINDOW)
+    except:
+        pass
+
+def get_mark_price():
+    return float(call_with_retry(client.futures_mark_price, symbol=SYMBOL)["markPrice"])
 
 def klines_df(symbol, interval, limit):
     raw = call_with_retry(client.futures_klines, symbol=symbol, interval=interval, limit=limit)
-    df = pd.DataFrame(raw, columns=["open_time","open","high","low","close","volume","close_time","qav","nt","tbb","tbq","ign"])
-    for c in ["open","high","low","close","volume"]: df[c] = df[c].astype(float)
+    df = pd.DataFrame(
+        raw,
+        columns=[
+            "open_time", "open", "high", "low", "close", "volume",
+            "close_time", "qav", "nt", "tbb", "tbq", "ign"
+        ]
+    )
+    for c in ["open", "high", "low", "close", "volume"]:
+        df[c] = df[c].astype(float)
     return df
 
 # =========================
 # INDIKATOR & SINYAL
 # =========================
-def ema(series, length): return series.ewm(span=length, adjust=False).mean()
+def ema(series, length):
+    return series.ewm(span=length, adjust=False).mean()
+
 def rsi(series, length=14):
     delta = series.diff()
-    rs = (delta.clip(lower=0).ewm(alpha=1/length, adjust=False).mean()) / (-delta.clip(upper=0).ewm(alpha=1/length, adjust=False).mean().replace(0, 1e-12))
+    rs = (
+        delta.clip(lower=0).ewm(alpha=1/length, adjust=False).mean()
+        /
+        (-delta.clip(upper=0).ewm(alpha=1/length, adjust=False).mean().replace(0, 1e-12))
+    )
     return 100 - (100 / (1 + rs))
+
 def atr(df, length=14):
-    tr = pd.concat([(df["high"] - df["low"]), (df["high"] - df["close"].shift(1)).abs(), (df["low"] - df["close"].shift(1)).abs()], axis=1).max(axis=1)
+    tr = pd.concat([
+        (df["high"] - df["low"]),
+        (df["high"] - df["close"].shift(1)).abs(),
+        (df["low"] - df["close"].shift(1)).abs()
+    ], axis=1).max(axis=1)
     return tr.ewm(alpha=1/length, adjust=False).mean()
+
 def adx(df, length=14):
-    up, down = df["high"].diff(), -df["low"].diff()
-    plus_dm, minus_dm = pd.Series(0.0, index=df.index), pd.Series(0.0, index=df.index)
+    up = df["high"].diff()
+    down = -df["low"].diff()
+
+    plus_dm = pd.Series(0.0, index=df.index)
+    minus_dm = pd.Series(0.0, index=df.index)
+
     plus_dm[(up > down) & (up > 0)] = up[(up > down) & (up > 0)]
     minus_dm[(down > up) & (down > 0)] = down[(down > up) & (down > 0)]
-    tr = pd.concat([(df["high"] - df["low"]), (df["high"] - df["close"].shift(1)).abs(), (df["low"] - df["close"].shift(1)).abs()], axis=1).max(axis=1)
+
+    tr = pd.concat([
+        (df["high"] - df["low"]),
+        (df["high"] - df["close"].shift(1)).abs(),
+        (df["low"] - df["close"].shift(1)).abs()
+    ], axis=1).max(axis=1)
+
     atr_s = tr.ewm(alpha=1/length, adjust=False).mean()
     plus_di = 100 * (plus_dm.ewm(alpha=1/length, adjust=False).mean() / atr_s.replace(0, 1e-12))
     minus_di = 100 * (minus_dm.ewm(alpha=1/length, adjust=False).mean() / atr_s.replace(0, 1e-12))
-    return (100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1e-12)).ewm(alpha=1/length, adjust=False).mean()
+
+    return (
+        100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1e-12)
+    ).ewm(alpha=1/length, adjust=False).mean()
 
 def compute_regime_and_bias(prev_mode):
     df15 = klines_df(SYMBOL, TF_REGIME, limit=max(220, VOL_LOOKBACK_15M + 20))
@@ -313,23 +406,35 @@ def compute_regime_and_bias(prev_mode):
     df15["adx"] = adx(df15, ADX_LEN)
 
     last = df15.iloc[-2] if len(df15) > 1 else df15.iloc[-1]
-    price, e200, ax = float(last["close"]), float(last["ema200"]), float(last["adx"])
+    price = float(last["close"])
+    e200 = float(last["ema200"])
+    ax = float(last["adx"])
 
     dist_pct = (price - e200) / e200 if e200 > 0 else 0.0
-    if dist_pct >= TREND_DEADBAND_PCT: bias = "LONG"
-    elif dist_pct <= -TREND_DEADBAND_PCT: bias = "SHORT"
-    else: bias = "NONE"
+    if dist_pct >= TREND_DEADBAND_PCT:
+        bias = "LONG"
+    elif dist_pct <= -TREND_DEADBAND_PCT:
+        bias = "SHORT"
+    else:
+        bias = "NONE"
 
-    mode = "TREND" if ax >= ADX_TREND_ON else "RANGE" if ax <= ADX_RANGE_ON else (prev_mode if prev_mode in ("TREND", "RANGE") else "RANGE")
+    if ax >= ADX_TREND_ON:
+        mode = "TREND"
+    elif ax <= ADX_RANGE_ON:
+        mode = "RANGE"
+    else:
+        mode = prev_mode if prev_mode in ("TREND", "RANGE") else "RANGE"
+
     return mode, bias, ax, df15
 
 def get_vol_regime_15m(df15):
     df15["atr_15"] = atr(df15, VOL_ATR_LEN_15M)
     last = df15.iloc[-2] if len(df15) > 1 else df15.iloc[-1]
-    
+
     price = float(last["close"])
     a = float(last["atr_15"]) if pd.notna(last["atr_15"]) else 0.0
-    if price <= 0 or a <= 0: return "UNKNOWN", 0.0, 0.0, 0.0
+    if price <= 0 or a <= 0:
+        return "UNKNOWN", 0.0, 0.0, 0.0
 
     atr_pct = a / price
     hist = df15["atr_15"].iloc[-VOL_LOOKBACK_15M:]
@@ -340,9 +445,12 @@ def get_vol_regime_15m(df15):
     low_th = med * VOL_LOW_MULT
     high_th = med * VOL_HIGH_MULT
 
-    if atr_pct < low_th: regime = "LOW_VOL"
-    elif atr_pct > high_th: regime = "HIGH_VOL"
-    else: regime = "NORMAL"
+    if atr_pct < low_th:
+        regime = "LOW_VOL"
+    elif atr_pct > high_th:
+        regime = "HIGH_VOL"
+    else:
+        regime = "NORMAL"
 
     return regime, atr_pct, low_th, high_th
 
@@ -355,153 +463,250 @@ def get_risk_pct_by_vol_regime(vol_regime: str) -> float:
 
 def compute_entry_indicators_5m():
     df5 = klines_df(SYMBOL, TF_ENTRY, limit=120)
-    df5["ema9"], df5["ema21"] = ema(df5["close"], EMA_FAST), ema(df5["close"], EMA_SLOW)
-    df5["rsi"], df5["atr"] = rsi(df5["close"], RSI_LEN), atr(df5, 14)
+    df5["ema9"] = ema(df5["close"], EMA_FAST)
+    df5["ema21"] = ema(df5["close"], EMA_SLOW)
+    df5["rsi"] = rsi(df5["close"], RSI_LEN)
+    df5["atr"] = atr(df5, 14)
     df5["vol_sma"] = df5["volume"].rolling(20).mean()
     df5["don_hi"] = df5["high"].rolling(DONCHIAN_LEN).max().shift(1)
     df5["don_lo"] = df5["low"].rolling(DONCHIAN_LEN).min().shift(1)
     return df5
 
-def _last_closed(df: pd.DataFrame): return df.iloc[-2] if len(df) >= 3 else df.iloc[-1]
+def _last_closed(df: pd.DataFrame):
+    return df.iloc[-2] if len(df) >= 3 else df.iloc[-1]
 
 def signal_trend_mode(df5, bias, adx15):
     last = _last_closed(df5)
     prev = df5.iloc[-3] if len(df5) >= 3 else last
 
-    if not pd.notna(last["atr"]) or float(last["atr"]) <= 0: return None, "atr_bad", bias
-    
+    if not pd.notna(last["atr"]) or float(last["atr"]) <= 0:
+        return None, "atr_bad", bias
+
     vs = float(last["vol_sma"]) if pd.notna(last["vol_sma"]) else 0.0
     v = float(last["volume"])
-    if vs <= 0: return None, "vol_sma_bad", bias
+    if vs <= 0:
+        return None, "vol_sma_bad", bias
 
     active_bias = bias
     if bias == "NONE":
-        if float(last["ema9"]) > float(last["ema21"]): active_bias = "LONG"
-        elif float(last["ema9"]) < float(last["ema21"]): active_bias = "SHORT"
+        if float(last["ema9"]) > float(last["ema21"]):
+            active_bias = "LONG"
+        elif float(last["ema9"]) < float(last["ema21"]):
+            active_bias = "SHORT"
 
-    if active_bias not in ("LONG", "SHORT"): return None, "no_clear_bias", active_bias
+    if active_bias not in ("LONG", "SHORT"):
+        return None, "no_clear_bias", active_bias
 
-    candle_bull, candle_bear = float(last["close"]) > float(last["open"]), float(last["close"]) < float(last["open"])
-    atr_tol, confirm_tol = PULLBACK_ATR_TOL * float(last["atr"]), TREND_CONFIRM_ATR_TOL * float(last["atr"])
+    candle_bull = float(last["close"]) > float(last["open"])
+    candle_bear = float(last["close"]) < float(last["open"])
+    atr_tol = PULLBACK_ATR_TOL * float(last["atr"])
+    confirm_tol = TREND_CONFIRM_ATR_TOL * float(last["atr"])
 
     if active_bias == "LONG":
-        if float(last["ema9"]) <= float(last["ema21"]): return None, "ema_not_aligned_long", active_bias
-        if float(last["rsi"]) < RSI_TREND_LONG_MIN: return None, "rsi_low_long", active_bias
-        
-        is_pullback = float(last["low"]) <= (float(last["ema21"]) + atr_tol) and candle_bull and (float(last["close"]) >= (float(last["ema9"]) - confirm_tol))
-        is_breakout = candle_bull and (float(last["close"]) > float(prev["high"])) and (float(last["close"]) >= (float(last["ema9"]) - confirm_tol))
+        if float(last["ema9"]) <= float(last["ema21"]):
+            return None, "ema_not_aligned_long", active_bias
+        if float(last["rsi"]) < RSI_TREND_LONG_MIN:
+            return None, "rsi_low_long", active_bias
+
+        is_pullback = (
+            float(last["low"]) <= (float(last["ema21"]) + atr_tol)
+            and candle_bull
+            and (float(last["close"]) >= (float(last["ema9"]) - confirm_tol))
+        )
+        is_breakout = (
+            candle_bull
+            and (float(last["close"]) > float(prev["high"]))
+            and (float(last["close"]) >= (float(last["ema9"]) - confirm_tol))
+        )
 
         if is_pullback:
-            if v < (VOL_PULLBACK_MULT * vs): return None, "pullback_vol_low", active_bias
+            if v < (VOL_PULLBACK_MULT * vs):
+                return None, "pullback_vol_low", active_bias
             return "BUY", "trend_pullback_entry", active_bias
         elif is_breakout:
-            if adx15 < ADX_TREND_ON: return None, "breakout_blocked_adx", active_bias
-            if v < (VOL_SPIKE_MULT * vs): return None, "breakout_blocked_vol_spike", active_bias
+            if adx15 < ADX_TREND_ON:
+                return None, "breakout_blocked_adx", active_bias
+            if v < (VOL_SPIKE_MULT * vs):
+                return None, "breakout_blocked_vol_spike", active_bias
             return "BUY", "trend_breakout_entry", active_bias
+
         return None, "no_setup_long", active_bias
 
-    if float(last["ema9"]) >= float(last["ema21"]): return None, "ema_not_aligned_short", active_bias
-    if float(last["rsi"]) > RSI_TREND_SHORT_MAX: return None, "rsi_high_short", active_bias
+    if float(last["ema9"]) >= float(last["ema21"]):
+        return None, "ema_not_aligned_short", active_bias
+    if float(last["rsi"]) > RSI_TREND_SHORT_MAX:
+        return None, "rsi_high_short", active_bias
 
-    is_pullback = float(last["high"]) >= (float(last["ema21"]) - atr_tol) and candle_bear and (float(last["close"]) <= (float(last["ema9"]) + confirm_tol))
-    is_breakout = candle_bear and (float(last["close"]) < float(prev["low"])) and (float(last["close"]) <= (float(last["ema9"]) + confirm_tol))
+    is_pullback = (
+        float(last["high"]) >= (float(last["ema21"]) - atr_tol)
+        and candle_bear
+        and (float(last["close"]) <= (float(last["ema9"]) + confirm_tol))
+    )
+    is_breakout = (
+        candle_bear
+        and (float(last["close"]) < float(prev["low"]))
+        and (float(last["close"]) <= (float(last["ema9"]) + confirm_tol))
+    )
 
     if is_pullback:
-        if v < (VOL_PULLBACK_MULT * vs): return None, "pullback_vol_low", active_bias
+        if v < (VOL_PULLBACK_MULT * vs):
+            return None, "pullback_vol_low", active_bias
         return "SELL", "trend_pullback_entry", active_bias
     elif is_breakout:
-        if adx15 < ADX_TREND_ON: return None, "breakout_blocked_adx", active_bias
-        if v < (VOL_SPIKE_MULT * vs): return None, "breakout_blocked_vol_spike", active_bias
+        if adx15 < ADX_TREND_ON:
+            return None, "breakout_blocked_adx", active_bias
+        if v < (VOL_SPIKE_MULT * vs):
+            return None, "breakout_blocked_vol_spike", active_bias
         return "SELL", "trend_breakout_entry", active_bias
+
     return None, "no_setup_short", active_bias
 
 def signal_range_mode(df5):
     last = _last_closed(df5)
-    if pd.isna(last["don_hi"]) or pd.isna(last["don_lo"]): return None, "donchian_not_ready", "NONE"
-    if not pd.notna(last["atr"]) or float(last["atr"]) <= 0: return None, "atr_bad", "NONE"
-    if pd.isna(last["vol_sma"]) or float(last["vol_sma"]) <= 0: return None, "vol_sma_bad", "NONE"
-    if float(last["volume"]) < (VOL_OK_RATIO_RANGE * float(last["vol_sma"])): return None, "range_low_volume", "NONE"
 
-    candle_bull, candle_bear = float(last["close"]) > float(last["open"]), float(last["close"]) < float(last["open"])
+    if pd.isna(last["don_hi"]) or pd.isna(last["don_lo"]):
+        return None, "donchian_not_ready", "NONE"
+    if not pd.notna(last["atr"]) or float(last["atr"]) <= 0:
+        return None, "atr_bad", "NONE"
+    if pd.isna(last["vol_sma"]) or float(last["vol_sma"]) <= 0:
+        return None, "vol_sma_bad", "NONE"
+    if float(last["volume"]) < (VOL_OK_RATIO_RANGE * float(last["vol_sma"])):
+        return None, "range_low_volume", "NONE"
+
+    candle_bull = float(last["close"]) > float(last["open"])
+    candle_bear = float(last["close"]) < float(last["open"])
     atr_tol = DONCHIAN_ATR_TOL * float(last["atr"])
 
-    if float(last["low"]) <= (float(last["don_lo"]) + atr_tol) and float(last["close"]) > float(last["don_lo"]) and candle_bull and float(last["rsi"]) >= RSI_RANGE_LONG_MIN:
+    if (
+        float(last["low"]) <= (float(last["don_lo"]) + atr_tol)
+        and float(last["close"]) > float(last["don_lo"])
+        and candle_bull
+        and float(last["rsi"]) >= RSI_RANGE_LONG_MIN
+    ):
         return "BUY", "range_reject_low", "NONE"
-    if float(last["high"]) >= (float(last["don_hi"]) - atr_tol) and float(last["close"]) < float(last["don_hi"]) and candle_bear and float(last["rsi"]) <= RSI_RANGE_SHORT_MAX:
+
+    if (
+        float(last["high"]) >= (float(last["don_hi"]) - atr_tol)
+        and float(last["close"]) < float(last["don_hi"])
+        and candle_bear
+        and float(last["rsi"]) <= RSI_RANGE_SHORT_MAX
+    ):
         return "SELL", "range_reject_high", "NONE"
+
     return None, "no_setup", "NONE"
 
 # =========================
 # EKSEKUSI & MANAJEMEN ORDER
 # =========================
-def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mode: str, mark_price: float, sl_mult: float=1.0, tp_mult: float=1.0):
+def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mode: str, mark_price: float, sl_mult: float = 1.0, tp_mult: float = 1.0):
     filters = _get_symbol_filters(SYMBOL)
     tick = float(filters["PRICE_FILTER"]["tickSize"])
     cancel_all_open_orders()
 
-    call_with_retry(client.futures_create_order, symbol=SYMBOL, side=side, type="MARKET", quantity=qty_q, recvWindow=RECV_WINDOW)
+    # --- REVISI 3: AMBIL RESPONSE ORDER ---
+    order_resp = call_with_retry(
+        client.futures_create_order,
+        symbol=SYMBOL,
+        side=side,
+        type="MARKET",
+        quantity=qty_q,
+        recvWindow=RECV_WINDOW
+    )
 
     actual_entry = 0.0
-    for _ in range(12):
-        time.sleep(0.5)
-        try:
-            pos = call_with_retry(client.futures_position_information, symbol=SYMBOL, recvWindow=RECV_WINDOW)
-            for p in pos or []:
-                if p.get("symbol") == SYMBOL and float(p.get("positionAmt", 0.0)) != 0.0:
-                    actual_entry = float(p.get("entryPrice", 0.0))
-                    break
-        except: pass
-        if actual_entry > 0: break
+    
+    # 1. Coba tangkap avgPrice langsung dari response Binance (Sniper instant)
+    if order_resp and order_resp.get("avgPrice"):
+        avg_price = float(order_resp.get("avgPrice"))
+        if avg_price > 0:
+            actual_entry = avg_price
 
-    if actual_entry <= 0.0: actual_entry = float(mark_price)
+    # 2. Fallback: Jika avgPrice masih 0 (API lag), baru lakukan looping polling
+    if actual_entry <= 0.0:
+        for _ in range(12):
+            time.sleep(0.5)
+            try:
+                pos = call_with_retry(client.futures_position_information, symbol=SYMBOL, recvWindow=RECV_WINDOW)
+                for p in pos or []:
+                    if p.get("symbol") == SYMBOL and float(p.get("positionAmt", 0.0)) != 0.0:
+                        actual_entry = float(p.get("entryPrice", 0.0))
+                        break
+            except:
+                pass
+            if actual_entry > 0:
+                break
+
+    if actual_entry <= 0.0:
+        actual_entry = float(mark_price)
+    # ---------------------------------------
 
     raw_sl_dist = (atr_val * TREND_SL_ATR_MULT) if mode == "TREND" else (atr_val * RANGE_SL_ATR_MULT)
     sl_min_pct = TREND_SL_MIN_PCT if mode == "TREND" else RANGE_SL_MIN_PCT
     sl_max_pct = TREND_SL_MAX_PCT if mode == "TREND" else RANGE_SL_MAX_PCT
-    
+
     sl_dist = sl_mult * max(actual_entry * sl_min_pct, min(raw_sl_dist, actual_entry * sl_max_pct))
     rr = (TREND_RR if mode == "TREND" else RANGE_RR) * tp_mult
-    
+
     if side == "BUY":
-        sl_price, tp_price = actual_entry - sl_dist, actual_entry + (sl_dist * rr)
+        sl_price = actual_entry - sl_dist
+        tp_price = actual_entry + (sl_dist * rr)
         op_side = "SELL"
     else:
-        sl_price, tp_price = actual_entry + sl_dist, actual_entry - (sl_dist * rr)
+        sl_price = actual_entry + sl_dist
+        tp_price = actual_entry - (sl_dist * rr)
         op_side = "BUY"
 
-    sl_q, tp_q = _round_tick(sl_price, tick), _round_tick(tp_price, tick)
+    sl_q = _round_tick(sl_price, tick)
+    tp_q = _round_tick(tp_price, tick)
 
     try:
-        call_with_retry(client.futures_create_order, symbol=SYMBOL, side=op_side, type="STOP_MARKET", stopPrice=sl_q, closePosition=True, workingType="MARK_PRICE", recvWindow=RECV_WINDOW)
-        call_with_retry(client.futures_create_order, symbol=SYMBOL, side=op_side, type="TAKE_PROFIT_MARKET", stopPrice=tp_q, closePosition=True, workingType="MARK_PRICE", recvWindow=RECV_WINDOW)
+        call_with_retry(
+            client.futures_create_order,
+            symbol=SYMBOL,
+            side=op_side,
+            type="STOP_MARKET",
+            stopPrice=sl_q,
+            closePosition=True,
+            workingType="MARK_PRICE",
+            recvWindow=RECV_WINDOW
+        )
+        call_with_retry(
+            client.futures_create_order,
+            symbol=SYMBOL,
+            side=op_side,
+            type="TAKE_PROFIT_MARKET",
+            stopPrice=tp_q,
+            closePosition=True,
+            workingType="MARK_PRICE",
+            recvWindow=RECV_WINDOW
+        )
     except Exception as e:
         print(f"CRITICAL ERROR: Failed Bracket. Emergency close. Error: {e}")
         try:
-            # OPTIMASI KEMBALI: Ambil quantity posisi aktual lalu close dengan reduceOnly=True
             current_pos_amt = 0.0
             pos = call_with_retry(client.futures_position_information, symbol=SYMBOL, recvWindow=RECV_WINDOW)
             for p in pos or []:
                 if p.get("symbol") == SYMBOL:
                     current_pos_amt = abs(float(p.get("positionAmt", 0.0)))
                     break
-            
+
             if current_pos_amt > 0:
                 call_with_retry(
-                    client.futures_create_order, 
-                    symbol=SYMBOL, 
-                    side=op_side, 
-                    type="MARKET", 
+                    client.futures_create_order,
+                    symbol=SYMBOL,
+                    side=op_side,
+                    type="MARKET",
                     quantity=current_pos_amt,
-                    reduceOnly=True, 
+                    reduceOnly=True,
                     recvWindow=RECV_WINDOW
                 )
-            
+
             send_telegram(f"🚨 EMERGENCY: Gagal pasang SL/TP. Posisi DITUTUP OTOMATIS! Err: {e}")
-            
+
             st_temp = load_state({})
             st_temp["cooldown_until"] = _dt_to_iso(datetime.now(timezone.utc) + pd.Timedelta(minutes=COOLDOWN_MINUTES))
             save_state(st_temp)
-            
+
         except Exception as ex:
             send_telegram(f"💀 FATAL: Gagal pasang SL/TP dan gagal close. CEK BINANCE MANUAL. Err: {repr(ex)}")
         raise
@@ -616,7 +821,7 @@ def manage_break_even(st, mark_price, tick_size, qty_q):
         st["be_failed_once"] = True
         save_state(st)
         print(f"🚨 Error activating BE: {e}")
-        
+
 # =========================
 # MAIN LOOP
 # =========================
@@ -629,7 +834,11 @@ def main():
     min_notional = get_min_notional(SYMBOL)
     tick_size = float(_get_symbol_filters(SYMBOL)["PRICE_FILTER"]["tickSize"])
 
-    send_telegram(f"🟢 {TG_PREFIX} started\nEq: ${get_wallet_balance_quote():.2f}\nMode: Ultimate Sniper {SYMBOL} + Vol Regime")
+    send_telegram(
+        f"🟢 {TG_PREFIX} started\n"
+        f"Eq: ${get_wallet_balance_quote():.2f}\n"
+        f"Mode: Ultimate Sniper {SYMBOL} + Vol Regime"
+    )
 
     st = load_state({
         "day_key": datetime.now(timezone.utc).date().isoformat(),
@@ -650,7 +859,11 @@ def main():
         "be_activated": False,
         "be_failed_once": False,
         "qty_q": 0.0,
-        "force_test_done": False
+        "force_test_done": False,
+        "pnl_pending_alert_sent": False,
+        "pnl_pending_since_ms": 0,
+        "last_pnl_pending_alert_ms": 0,
+        "margin_trap_alert_sent": False,
     })
 
     last_time_sync = time.time()
@@ -659,20 +872,31 @@ def main():
     while True:
         try:
             now = datetime.now(timezone.utc)
+
             if (time.time() - last_time_sync) >= TIME_SYNC_EVERY_S:
-                if sync_time_offset(): last_time_sync = time.time()
+                if sync_time_offset():
+                    last_time_sync = time.time()
 
             cur_day = now.date().isoformat()
             if cur_day != st.get("day_key"):
-                st.update({"day_key": cur_day, "start_equity_today": get_wallet_balance_quote(), "daily_realized_pnl": 0.0, "trades_today": 0, "loss_streak": 0, "daily_locked": False, "cooldown_until": None, "force_test_done": False})
+                st.update({
+                    "day_key": cur_day,
+                    "start_equity_today": get_wallet_balance_quote(),
+                    "daily_realized_pnl": 0.0,
+                    "trades_today": 0,
+                    "loss_streak": 0,
+                    "daily_locked": False,
+                    "cooldown_until": None,
+                    "force_test_done": False,
+                    "margin_trap_alert_sent": False
+                })
                 send_telegram(f"🗓 {SYMBOL} Day reset. Start equity: ${st['start_equity_today']:.2f}")
                 save_state(st)
 
-            # MENGEMBALIKAN KE CALL TERPISAH
             equity_now = get_wallet_balance_quote()
             pos_amt = get_position_amt()
             in_pos = abs(pos_amt) > 0
-            
+
             if in_pos and not st.get("prev_in_position"):
                 st["prev_in_position"] = True
                 if not st.get("position_open_ms"):
@@ -690,14 +914,41 @@ def main():
                 )
 
                 if not got_any:
-                    
-                    send_telegram(f"⚠️ {SYMBOL} posisi tertutup, tapi data PnL Binance belum terbaca. Bot akan cek lagi di loop berikutnya.")
+                    now_ms = int(time.time() * 1000)
+
+                    if not st.get("pnl_pending_alert_sent", False):
+                        st["pnl_pending_alert_sent"] = True
+                        st["pnl_pending_since_ms"] = now_ms
+                        st["last_pnl_pending_alert_ms"] = now_ms
+                        save_state(st)
+
+                        send_telegram(
+                            f"⚠️ {SYMBOL} posisi tertutup, tapi data PnL Binance belum terbaca. "
+                            f"Bot akan cek lagi otomatis."
+                        )
+                    else:
+                        remind_every_ms = 10 * 60 * 1000
+                        last_alert_ms = int(st.get("last_pnl_pending_alert_ms", 0) or 0)
+
+                        if now_ms - last_alert_ms >= remind_every_ms:
+                            st["last_pnl_pending_alert_ms"] = now_ms
+                            save_state(st)
+
+                            send_telegram(
+                                f"⏳ {SYMBOL} PnL masih belum terbaca dari Binance, "
+                                f"bot masih menunggu update."
+                            )
+
                     time.sleep(SLEEP_SLOW)
                     continue
 
                 st["last_pnl_check_ms"] = int(time.time() * 1000)
                 st["daily_realized_pnl"] = float(st.get("daily_realized_pnl", 0.0)) + pnl
                 st["loss_streak"] = int(st.get("loss_streak", 0)) + 1 if pnl < 0 else 0
+
+                st["pnl_pending_alert_sent"] = False
+                st["pnl_pending_since_ms"] = 0
+                st["last_pnl_pending_alert_ms"] = 0
 
                 st.update({
                     "entry_price": 0.0,
@@ -725,6 +976,14 @@ def main():
             if in_pos:
                 st["prev_in_position"] = True
                 mark_price = get_mark_price()
+                
+                # --- REVISI 1: FAILSAFE ZOMBIE TRADE ---
+                if float(st.get("entry_price", 0.0)) <= 0:
+                    send_telegram(f"💀 BAHAYA: Posisi {SYMBOL} terbuka tapi state entry_price 0 (Zombie Trade)! Bot mencoba set entry = mark_price untuk cegah nyangkut.")
+                    st["entry_price"] = mark_price
+                    save_state(st)
+                # ---------------------------------------
+
                 manage_break_even(st, mark_price, tick_size, st.get("qty_q", 0.0))
                 time.sleep(SLEEP_SLOW)
                 continue
@@ -758,9 +1017,8 @@ def main():
 
             st["mode"], bias, adx15, df15 = compute_regime_and_bias(st.get("mode", "RANGE"))
             vol_regime, atrp, low_th, high_th = get_vol_regime_15m(df15)
-            
+
             df5 = compute_entry_indicators_5m()
-            
             if df5 is None or len(df5) < 3:
                 time.sleep(SLEEP_SLOW)
                 continue
@@ -772,17 +1030,17 @@ def main():
                 if st.get("force_test_done", False):
                     time.sleep(SLEEP_SLOW)
                     continue
-                
+
                 step_size = float(_get_symbol_filters(SYMBOL)["LOT_SIZE"]["stepSize"])
                 qty_q = _quantize_step((min_notional * 1.1) / price, step_size)
-                
+
                 print(f"🧪 MENJALANKAN FORCE_TEST_ENTRY: {FORCE_TEST_SIDE} | Qty: {qty_q}")
-                
+
                 try:
                     actual_price, sl_final, tp_final, sl_dist_actual = place_order_with_actual_bracket(
                         FORCE_TEST_SIDE, qty_q, float(last_closed["atr"]), st["mode"], price, 1.0, 1.0
                     )
-                    
+
                     st.update({
                         "trades_today": int(st.get("trades_today", 0)) + 1,
                         "cooldown_until": _dt_to_iso(now + pd.Timedelta(minutes=COOLDOWN_MINUTES)),
@@ -793,30 +1051,48 @@ def main():
                         "be_activated": False,
                         "be_failed_once": False,
                         "position_open_ms": int(time.time() * 1000),
-                        "force_test_done": True
+                        "force_test_done": True,
+                        "pnl_pending_alert_sent": False,
+                        "pnl_pending_since_ms": 0,
+                        "last_pnl_pending_alert_ms": 0,
+                        "margin_trap_alert_sent": False,
                     })
                     save_state(st)
-                    
-                    send_telegram(f"🧪 FORCE TEST SUKSES: {SYMBOL} {FORCE_TEST_SIDE}\nEntry: {actual_price}\nSL: {sl_final} | TP: {tp_final}")
+
+                    send_telegram(
+                        f"🧪 FORCE TEST SUKSES: {SYMBOL} {FORCE_TEST_SIDE}\n"
+                        f"Entry: {actual_price}\n"
+                        f"SL: {sl_final} | TP: {tp_final}"
+                    )
                 except Exception as e:
                     print(f"Force test entry gagal: {e}")
-                
+
                 time.sleep(SLEEP_SLOW)
                 continue
 
             active_bias = "NONE"
-            if st["mode"] == "TREND": side, reason, active_bias = signal_trend_mode(df5, bias, float(adx15))
-            else: side, reason, active_bias = signal_range_mode(df5)
+            if st["mode"] == "TREND":
+                side, reason, active_bias = signal_trend_mode(df5, bias, float(adx15))
+            else:
+                side, reason, active_bias = signal_range_mode(df5)
 
             if vol_regime == "LOW_VOL" and reason in ("trend_breakout_entry",):
                 side = None
                 reason = "blocked_low_vol_breakout"
 
             dbg = {
-                "price": price, "adx15": float(adx15), "ema9": float(last_closed.get("ema9", 0.0)), "ema21": float(last_closed.get("ema21", 0.0)), 
-                "rsi5": float(last_closed.get("rsi", 0.0)), "atr5": float(last_closed.get("atr", 0.0)), "vol": float(last_closed.get("volume", 0.0)), 
+                "price": price,
+                "adx15": float(adx15),
+                "ema9": float(last_closed.get("ema9", 0.0)),
+                "ema21": float(last_closed.get("ema21", 0.0)),
+                "rsi5": float(last_closed.get("rsi", 0.0)),
+                "atr5": float(last_closed.get("atr", 0.0)),
+                "vol": float(last_closed.get("volume", 0.0)),
                 "vol_sma": float(last_closed.get("vol_sma", 0.0)) if pd.notna(last_closed.get("vol_sma", 0.0)) else 0.0,
-                "vol_regime": vol_regime, "atr_pct15": atrp, "atrp_low": low_th, "atrp_high": high_th
+                "vol_regime": vol_regime,
+                "atr_pct15": atrp,
+                "atrp_low": low_th,
+                "atrp_high": high_th
             }
             log_loop(now, equity_now, st["mode"], bias, active_bias, reason, dbg)
 
@@ -834,12 +1110,12 @@ def main():
             raw_sl_dist = (atr_val * TREND_SL_ATR_MULT) if st["mode"] == "TREND" else (atr_val * RANGE_SL_ATR_MULT)
             sl_min_pct = TREND_SL_MIN_PCT if st["mode"] == "TREND" else RANGE_SL_MIN_PCT
             sl_max_pct = TREND_SL_MAX_PCT if st["mode"] == "TREND" else RANGE_SL_MAX_PCT
-            
+
             sl_dist_est = sl_mult * max(price * sl_min_pct, min(raw_sl_dist, price * sl_max_pct))
 
             risk_pct_used = get_risk_pct_by_vol_regime(vol_regime)
             risk_usd = equity_now * risk_pct_used
-            
+
             qty = (risk_usd / sl_dist_est) if sl_dist_est > 0 else 0.0
             step_size = float(_get_symbol_filters(SYMBOL)["LOT_SIZE"]["stepSize"])
             qty_q = _quantize_step(qty, step_size)
@@ -849,20 +1125,41 @@ def main():
                 forced_notional = min_notional * 1.02
                 qty_q = _quantize_step(forced_notional / price, step_size)
                 notional_q = qty_q * price
+                
+                # --- REVISI 2: NOTIFIKASI JEBAKAN MODAL KECIL ---
                 if ((qty_q * sl_dist_est) / max(equity_now, 1e-9)) > MAX_FORCED_RISK_PCT:
                     print(f"Skip: Risk melebihi MAX_FORCED_RISK ({MAX_FORCED_RISK_PCT*100}%)")
-                    time.sleep(SLEEP_SLOW); continue
+                    
+                    if not st.get("margin_trap_alert_sent", False):
+                        send_telegram(
+                            f"🪤 JEBAKAN MODAL KECIL: Modal tidak kuat menahan Minimum Notional {SYMBOL}. "
+                            f"Risk terpaksa melebihi batas {MAX_FORCED_RISK_PCT*100}%. Bot SKIP entry."
+                        )
+                        st["margin_trap_alert_sent"] = True
+                        save_state(st)
+                    
+                    time.sleep(SLEEP_SLOW)
+                    continue
+                else:
+                    st["margin_trap_alert_sent"] = False
+                # ------------------------------------------------
 
-            if (notional_q / LEVERAGE) > (equity_now * MAX_MARGIN_FRACTION): time.sleep(SLEEP_SLOW); continue
-            
+            if (notional_q / LEVERAGE) > (equity_now * MAX_MARGIN_FRACTION):
+                time.sleep(SLEEP_SLOW)
+                continue
+
             est_fee = (notional_q * TAKER_FEE_PCT) * 2.0
             rr = (TREND_RR if st["mode"] == "TREND" else RANGE_RR) * tp_mult
-            
-            if (qty_q * (sl_dist_est * rr)) <= est_fee * 3.0: time.sleep(SLEEP_SLOW); continue
+
+            if (qty_q * (sl_dist_est * rr)) <= est_fee * 3.0:
+                time.sleep(SLEEP_SLOW)
+                continue
 
             if notional_q >= min_notional and qty_q > 0:
-                actual_price, sl_final, tp_final, sl_dist_actual = place_order_with_actual_bracket(side, qty_q, atr_val, st["mode"], price, sl_mult, tp_mult)
-                
+                actual_price, sl_final, tp_final, sl_dist_actual = place_order_with_actual_bracket(
+                    side, qty_q, atr_val, st["mode"], price, sl_mult, tp_mult
+                )
+
                 st.update({
                     "trades_today": int(st.get("trades_today", 0)) + 1,
                     "cooldown_until": _dt_to_iso(now + pd.Timedelta(minutes=COOLDOWN_MINUTES)),
@@ -872,7 +1169,11 @@ def main():
                     "qty_q": qty_q,
                     "be_activated": False,
                     "be_failed_once": False,
-                    "position_open_ms": int(time.time() * 1000)
+                    "position_open_ms": int(time.time() * 1000),
+                    "pnl_pending_alert_sent": False,
+                    "pnl_pending_since_ms": 0,
+                    "last_pnl_pending_alert_ms": 0,
+                    "margin_trap_alert_sent": False,
                 })
                 save_state(st)
 
@@ -892,11 +1193,13 @@ def main():
         except Exception as e:
             msg = str(e)
             print(f"Loop Error: {msg}")
-            traceback.print_exc() 
-            
+            traceback.print_exc()
+
             if ("Timestamp for this request" in msg) or ("recvWindow" in msg) or ("-1021" in msg):
                 sync_time_offset()
                 last_time_sync = time.time()
+
             time.sleep(SLEEP_SLOW)
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    main()
