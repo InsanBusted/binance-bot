@@ -108,7 +108,7 @@ TREND_SL_MAX_PCT = 0.0400
 
 # V6 - structure aware stop loss
 USE_STRUCTURE_SL = True
-SWING_LOOKBACK_BARS = 30
+SWING_LOOKBACK_BARS = 20
 TREND_SWING_BUFFER_ATR_MULT = 1.5  # Buffer di bawah swing dilebarkan aman dari jarum
 RANGE_SWING_BUFFER_ATR_MULT = 1.0
 TREND_STRUCTURE_SL_HARD_MAX_PCT = 0.0500
@@ -1529,6 +1529,8 @@ def main():
 
             if in_pos:
                 st["prev_in_position"] = True
+                
+                print(f"[{now.strftime('%H:%M:%S')}] 🟢 Sedang memantau posisi terbuka {SYMBOL} | PnL Sementara: ${round(unrealized_pnl, 4)}")
 
                 current_mark = None
                 last_tp_mark_check_ts = float(st.get("last_tp_mark_check_ts", 0.0) or 0.0)
