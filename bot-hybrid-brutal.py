@@ -507,7 +507,7 @@ def check_telegram_commands(st):
                 st["last_tg_update_id"] = update_id
                 
                 if text == "/status":
-                    eq = get_wallet_balance_usdc()
+                    eq = get_wallet_balance_quote()
                     upnl = get_unrealized_pnl()
                     pos_amt = get_position_amt()
                     in_pos = abs(pos_amt) > 0
