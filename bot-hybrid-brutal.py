@@ -861,7 +861,7 @@ def main():
     streamer.start()
     time.sleep(2)
 
- try:
+    try:
         while True:
             now = datetime.now(timezone.utc)
             
