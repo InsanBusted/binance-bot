@@ -32,29 +32,60 @@ class BinanceStreamer:
         self.twm = ThreadedWebsocketManager(api_key=api_key, api_secret=api_secret, testnet=True)
         self.mark_price = 0.0
         self.candle_closed = False
+        
+        # --- [BARU] Inisialisasi Memori Candle ---
+        self.kline_data = [] 
+        self._init_historical_data()
+
+    def _init_historical_data(self):
+        # Unduh 260 candle (HANYA SEKALI SAAT BOT START)
+        print(f"Mengunduh riwayat {self.tf_entry} awal untuk {self.symbol}...")
+        raw = call_with_retry(client.futures_klines, symbol=self.symbol, interval=self.tf_entry, limit=260)
+        self.kline_data = [{
+            "open_time": x[0],
+            "open": float(x[1]),
+            "high": float(x[2]),
+            "low": float(x[3]),
+            "close": float(x[4]),
+            "volume": float(x[5])
+        } for x in raw]
 
     def start(self):
         self.twm.start()
-        # Stream Mark Price (Update hitungan milidetik)
         self.twm.start_symbol_mark_price_socket(callback=self.handle_mark_price, symbol=self.symbol)
-        # Stream Klines (Update pergerakan candle)
         self.twm.start_kline_socket(callback=self.handle_kline, symbol=self.symbol, interval=self.tf_entry)
         print(f"🟢 WebSocket Stream Started for {self.symbol}...")
 
     def handle_mark_price(self, msg):
-        # Tambahkan pengecekan agar tidak error jika 'e' tidak ada
         if msg and isinstance(msg, dict) and 'e' in msg:
             if msg['e'] == 'markPriceUpdate':
                 self.mark_price = float(msg['p'])
-        else:
-            # Ini biasanya pesan koneksi (ping/pong), abaikan saja
-            pass
 
     def handle_kline(self, msg):
-        # Tambahkan pengecekan yang sama di sini
         if msg and isinstance(msg, dict) and 'e' in msg:
             if msg['e'] == 'kline':
-                if msg['k']['x']:  # Jika 'x' True, artinya candle baru saja tutup
+                k = msg['k']
+                
+                # --- [BARU] Logika Update Memori Real-Time ---
+                if k['t'] > self.kline_data[-1]['open_time']:
+                    # Jika waktu buka candle WebSocket lebih baru = Ada Candle Baru
+                    self.kline_data.pop(0)  # Buang candle paling tua (biar tetap 260)
+                    self.kline_data.append({
+                        "open_time": k['t'],
+                        "open": float(k['o']),
+                        "high": float(k['h']),
+                        "low": float(k['l']),
+                        "close": float(k['c']),
+                        "volume": float(k['v'])
+                    })
+                else:
+                    # Update data candle terakhir yang sedang berjalan
+                    self.kline_data[-1]["high"] = float(k['h'])
+                    self.kline_data[-1]["low"] = float(k['l'])
+                    self.kline_data[-1]["close"] = float(k['c'])
+                    self.kline_data[-1]["volume"] = float(k['v'])
+
+                if k['x']:  # Jika candle baru saja tertutup
                     self.candle_closed = True
 
     def stop(self):
@@ -495,8 +526,11 @@ def get_risk_pct_by_vol_regime(vol_regime: str) -> float:
     elif vol_regime == "HIGH_VOL": return RISK_PCT * HIGH_VOL_RISK_MULT
     return RISK_PCT * NORMAL_VOL_RISK_MULT
 
-def compute_entry_indicators_5m() -> Tuple[pd.DataFrame, dict]:
-    df5 = klines_df(SYMBOL, TF_ENTRY, limit=260)
+def compute_entry_indicators_5m(streamer_obj) -> Tuple[pd.DataFrame, dict]:
+    # HANYA gunakan data dari memori streamer
+    df5 = pd.DataFrame(streamer_obj.kline_data)
+    
+    # Lanjut hitung indikator seperti biasa
     df5["ema_fast"] = ema(df5["close"], EMA_FAST)     # EMA 20
     df5["ema_slow"] = ema(df5["close"], EMA_SLOW)     # EMA 50
     df5["ema_200"] = ema(df5["close"], EMA_200)       # EMA 200
@@ -678,13 +712,26 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
     try:
         responses = call_with_retry(
             client.futures_place_batch_order,
-            batchOrders=batch_payload,  # Hapus json.dumps() di sini
+            batchOrders=batch_payload,  
             recvWindow=RECV_WINDOW
         )
         if responses and isinstance(responses, list):
             entry_order = responses[0]
+            sl_order = responses[1] if len(responses) > 1 else {}
+            tp_order = responses[2] if len(responses) > 2 else {}
+
+            # 1. Cek Error Entry
             if "code" in entry_order and entry_order["code"] < 0:
-                raise Exception(f"Batch Order Entry Failed: {entry_order['msg']}")
+                raise Exception(f"Entry Failed: {entry_order['msg']}")
+            
+            # 2. Cek Error SL (Mencegah Order Telanjang!)
+            if "code" in sl_order and sl_order["code"] < 0:
+                raise Exception(f"SL Failed: {sl_order['msg']}")
+                
+            # 3. Cek Error TP (Mencegah Order Telanjang!)
+            if "code" in tp_order and tp_order["code"] < 0:
+                raise Exception(f"TP Failed: {tp_order['msg']}")
+
             actual_entry = float(entry_order.get("avgPrice", 0.0))
             
         if actual_entry <= 0.0: actual_entry = float(mark_price)
@@ -814,7 +861,7 @@ def main():
     streamer.start()
     time.sleep(2)
 
-    try:
+ try:
         while True:
             now = datetime.now(timezone.utc)
             
@@ -822,14 +869,20 @@ def main():
             # Kita coba ambil dari WebSocket dulu (paling cepat)
             current_mark_price = streamer.mark_price
             
-            # Jika WebSocket macet (0.0), kita paksa ambil lewat REST API
+            # Jika WebSocket belum connect atau macet (0.0), beri jeda sedikit
             if current_mark_price <= 0:
-                try:
-                    current_mark_price = get_mark_price()
-                except Exception as e:
-                    print(f"[{datetime.now()}] 🚨 Fatal: API Error saat ambil harga: {e}")
-                    time.sleep(2)
-                    continue
+                time.sleep(0.5) # Tunggu setengah detik
+                current_mark_price = streamer.mark_price
+                
+                # Jika masih 0.0, paksa ambil lewat REST API
+                if current_mark_price <= 0:
+                    try:
+                        current_mark_price = get_mark_price()
+                        streamer.mark_price = current_mark_price # Sinkronisasi balik ke streamer
+                    except Exception as e:
+                        print(f"[{datetime.now()}] 🚨 Fatal: API Error saat ambil harga: {e}")
+                        time.sleep(2)
+                        continue
 
             # Debugging agar kamu bisa pantau di PM2 Logs
             if int(time.time()) % 10 == 0: # Print setiap 10 detik biar gak spam
@@ -863,16 +916,6 @@ def main():
                 
                 # PENEMPATAN FIX 2: Check telegram sejajar di sini (tiap REST_INTERVAL)
                 check_telegram_commands(st)
-
-                # --- HEALTH CHECK TELEGRAM ---
-              #  if time.time() - last_health_check >= HEALTH_CHECK_S:
-               #     last_health_check = time.time()
-                #    eq_check = get_wallet_balance_quote()
-                 #   send_telegram(
-                  #      f"🤖 {SYMBOL} Health Check\n"
-                   #     f"Equity: ${eq_check:.2f} | PnL Day: ${st.get('daily_realized_pnl', 0.0):.2f}\n"
-                    #    f"Trades: {st.get('trades_today', 0)} | Status: {'🟢 In Pos' if st.get('prev_in_position') else '⚪ Idle'}"
-                    #)
 
                 cur_day = now.date().isoformat()
                 if cur_day != st.get("day_key"):
@@ -949,7 +992,9 @@ def main():
                 # ANALISA PASAR
                 st["mode"], bias, chop15, df15 = compute_regime_and_bias(st.get("mode", "RANGE"))
                 vol_regime, atrp, low_th, high_th = get_vol_regime_15m(df15)
-                df5, dbg5 = compute_entry_indicators_5m()
+                
+                # --- PERBAIKAN FATAL: Memasukkan parameter streamer ---
+                df5, dbg5 = compute_entry_indicators_5m(streamer)
                 
                 if df5 is None or len(df5) < 3: continue
 
@@ -1047,6 +1092,7 @@ def main():
                         )
 
             time.sleep(0.1)
+            
 
     except Exception as e:
         print(f"Loop Error: {e}")
