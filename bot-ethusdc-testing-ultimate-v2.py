@@ -806,6 +806,8 @@ def main():
             }
             log_loop(now, equity_now, st["mode"], bias, active_bias, reason, dbg)
 
+            print(f"[{now.strftime('%H:%M:%S')}] 🔍 P:{price} | Mode:{st['mode']} | Bias:{active_bias} | Alasan Skip: {reason}")
+
             if side is None:
                 time.sleep(SLEEP_SLOW)
                 continue
