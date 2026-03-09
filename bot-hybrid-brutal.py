@@ -372,11 +372,79 @@ def get_closed_trade_pnl_with_retry(start_ms, seen_tran_ids, retries=5, wait_sec
         time.sleep(wait_sec)
     return total_pnl, got_any
 
-def cancel_all_open_orders():
+def cancel_all_open_orders(symbol: str = SYMBOL, max_wait_rounds: int = 3) -> bool:
+    """
+    Cancel semua open order untuk symbol ini saja.
+    Tidak akan mengganggu pair lain selama symbol tetap spesifik.
+    Return True kalau sudah bersih, False kalau masih ada sisa order / gagal cek.
+    """
     try:
-        call_with_retry(client.futures_cancel_all_open_orders, symbol=SYMBOL, recvWindow=RECV_WINDOW)
-    except:
-        pass
+        open_orders = call_with_retry(
+            client.futures_get_open_orders,
+            symbol=symbol,
+            recvWindow=RECV_WINDOW
+        )
+    except Exception as e:
+        print(f"cancel_all_open_orders() gagal ambil open orders: {e}")
+        return False
+
+    if not open_orders:
+        return True
+
+    # Coba mass cancel dulu
+    try:
+        call_with_retry(
+            client.futures_cancel_all_open_orders,
+            symbol=symbol,
+            recvWindow=RECV_WINDOW
+        )
+    except Exception as e:
+        print(f"cancel_all_open_orders() mass cancel error: {e}")
+
+    # Verifikasi. Kalau masih ada, cancel satu-satu
+    for _ in range(max_wait_rounds):
+        time.sleep(0.3)
+        try:
+            remaining = call_with_retry(
+                client.futures_get_open_orders,
+                symbol=symbol,
+                recvWindow=RECV_WINDOW
+            )
+        except Exception as e:
+            print(f"cancel_all_open_orders() gagal verifikasi open orders: {e}")
+            return False
+
+        if not remaining:
+            return True
+
+        for o in remaining:
+            order_id = o.get("orderId")
+            if not order_id:
+                continue
+            try:
+                call_with_retry(
+                    client.futures_cancel_order,
+                    symbol=symbol,
+                    orderId=order_id,
+                    recvWindow=RECV_WINDOW
+                )
+            except Exception as e:
+                print(f"Gagal cancel order {order_id}: {e}")
+
+    # Final check
+    try:
+        final_remaining = call_with_retry(
+            client.futures_get_open_orders,
+            symbol=symbol,
+            recvWindow=RECV_WINDOW
+        )
+        if final_remaining:
+            print(f"WARNING: Masih ada {len(final_remaining)} open order tersisa di {symbol}")
+            return False
+        return True
+    except Exception as e:
+        print(f"cancel_all_open_orders() final check error: {e}")
+        return False
 
 def klines_df(symbol, interval, limit):
     raw = call_with_retry(client.futures_klines, symbol=symbol, interval=interval, limit=limit)
@@ -676,89 +744,92 @@ def signal_range_mode(df5: pd.DataFrame) -> Tuple[Optional[str], str, dict]:
 # =========================
 # EKSEKUSI & MANAJEMEN ORDER
 # =========================
-def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mode: str, mark_price: float, sl_mult: float = 1.0, tp_mult: float = 1.0):
+
+def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mode: str, mark_price: float, sl_mult: float=1.0, tp_mult: float=1.0):
+    # Dapatkan tick_size dari sistem cache yang sudah ada di script Anda
     filters = _get_symbol_filters(SYMBOL)
     tick = float(filters["PRICE_FILTER"]["tickSize"])
+    
+    # Bersihkan sisa order lama agar tidak bentrok
     cancel_all_open_orders()
 
+    # 1. Tembak Entry Market Terlebih Dahulu
+    try:
+        call_with_retry(
+            client.futures_create_order, 
+            symbol=SYMBOL, side=side, type="MARKET", quantity=qty_q, recvWindow=RECV_WINDOW
+        )
+    except Exception as e:
+        print(f"❌ Gagal buka posisi Entry: {e}")
+        return 0.0, 0.0, 0.0, 0.0
+
+    # 2. Tunggu Posisi Terbaca & Ambil Harga Entry Aktual
+    actual_entry = 0.0
+    for _ in range(12): # Tunggu max 6 detik (12 * 0.5s)
+        time.sleep(0.5)
+        try:
+            pos = call_with_retry(client.futures_position_information, symbol=SYMBOL, recvWindow=RECV_WINDOW)
+            for p in pos or []:
+                if p.get("symbol") == SYMBOL and float(p.get("positionAmt", 0.0)) != 0.0:
+                    actual_entry = float(p.get("entryPrice", 0.0))
+                    break
+        except: pass
+        if actual_entry > 0: break
+
+    # Jika API lag/telat merespon, gunakan mark_price sebagai backup perhitungan
+    if actual_entry <= 0.0: 
+        actual_entry = float(mark_price)
+
+    # 3. Hitung Jarak SL & TP dari Harga Aktual
     raw_sl_dist = (atr_val * TREND_SL_ATR_MULT) if mode == "TREND" else (atr_val * RANGE_SL_ATR_MULT)
     sl_min_pct = TREND_SL_MIN_PCT if mode == "TREND" else RANGE_SL_MIN_PCT
     sl_max_pct = TREND_SL_MAX_PCT if mode == "TREND" else RANGE_SL_MAX_PCT
-
-    sl_dist = sl_mult * max(mark_price * sl_min_pct, min(raw_sl_dist, mark_price * sl_max_pct))
+    
+    sl_dist = sl_mult * max(actual_entry * sl_min_pct, min(raw_sl_dist, actual_entry * sl_max_pct))
     rr = (TREND_RR if mode == "TREND" else RANGE_RR) * tp_mult
-
+    
     if side == "BUY":
-        sl_price = mark_price - sl_dist
-        tp_price = mark_price + (sl_dist * rr)
+        sl_price, tp_price = actual_entry - sl_dist, actual_entry + (sl_dist * rr)
         op_side = "SELL"
     else:
-        sl_price = mark_price + sl_dist
-        tp_price = mark_price - (sl_dist * rr)
+        sl_price, tp_price = actual_entry + sl_dist, actual_entry - (sl_dist * rr)
         op_side = "BUY"
 
+    # Pembulatan sesuai tick_size Binance
     sl_q = _round_tick(sl_price, tick)
     tp_q = _round_tick(tp_price, tick)
 
-    # BATCH ORDER ATOMIC PAYLOAD
-    batch_payload = [
-        {"symbol": SYMBOL, "side": side, "type": "MARKET", "quantity": str(qty_q)},
-        {"symbol": SYMBOL, "side": op_side, "type": "STOP_MARKET", "stopPrice": str(sl_q), "closePosition": "true", "workingType": "MARK_PRICE"},
-        {"symbol": SYMBOL, "side": op_side, "type": "TAKE_PROFIT_MARKET", "stopPrice": str(tp_q), "closePosition": "true", "workingType": "MARK_PRICE"}
-    ]
-
-    actual_entry = 0.0
-
+    # 4. Pasang STOP_MARKET dan TAKE_PROFIT_MARKET Satu per Satu
     try:
-        responses = call_with_retry(
-            client.futures_place_batch_order,
-            batchOrders=batch_payload,  
-            recvWindow=RECV_WINDOW
+        call_with_retry(
+            client.futures_create_order, symbol=SYMBOL, side=op_side, type="STOP_MARKET", 
+            stopPrice=sl_q, closePosition=True, workingType="MARK_PRICE", recvWindow=RECV_WINDOW
         )
-        if responses and isinstance(responses, list):
-            entry_order = responses[0]
-            sl_order = responses[1] if len(responses) > 1 else {}
-            tp_order = responses[2] if len(responses) > 2 else {}
-
-            # 1. Cek Error Entry
-            if "code" in entry_order and entry_order["code"] < 0:
-                raise Exception(f"Entry Failed: {entry_order['msg']}")
-            
-            # 2. Cek Error SL (Mencegah Order Telanjang!)
-            if "code" in sl_order and sl_order["code"] < 0:
-                raise Exception(f"SL Failed: {sl_order['msg']}")
-                
-            # 3. Cek Error TP (Mencegah Order Telanjang!)
-            if "code" in tp_order and tp_order["code"] < 0:
-                raise Exception(f"TP Failed: {tp_order['msg']}")
-
-            actual_entry = float(entry_order.get("avgPrice", 0.0))
-            
-        if actual_entry <= 0.0: actual_entry = float(mark_price)
-
+        call_with_retry(
+            client.futures_create_order, symbol=SYMBOL, side=op_side, type="TAKE_PROFIT_MARKET", 
+            stopPrice=tp_q, closePosition=True, workingType="MARK_PRICE", recvWindow=RECV_WINDOW
+        )
     except Exception as e:
-        print(f"CRITICAL ERROR: Failed Batch Order. Emergency close. Error: {e}")
+        print(f"🚨 CRITICAL ERROR: Gagal pasang Bracket SL/TP. Melakukan Emergency Close! Error: {e}")
         try:
-            cancel_all_open_orders()
+            # Fitur Safety: Jika gagal pasang SL/TP, tutup posisi agar modal tidak nyangkut (Force Close)
             current_pos_amt = 0.0
             pos = call_with_retry(client.futures_position_information, symbol=SYMBOL, recvWindow=RECV_WINDOW)
             for p in pos or []:
                 if p.get("symbol") == SYMBOL:
                     current_pos_amt = abs(float(p.get("positionAmt", 0.0)))
                     break
-
+            
             if current_pos_amt > 0:
                 call_with_retry(
-                    client.futures_create_order,
-                    symbol=SYMBOL, side=op_side, type="MARKET", quantity=current_pos_amt, reduceOnly=True, recvWindow=RECV_WINDOW
+                    client.futures_create_order, symbol=SYMBOL, side=op_side, type="MARKET", 
+                    quantity=current_pos_amt, reduceOnly=True, recvWindow=RECV_WINDOW
                 )
-            send_telegram(f"🚨 EMERGENCY: Gagal eksekusi Batch Order. Posisi DITUTUP OTOMATIS! Err: {e}")
-            st_temp = load_state({})
-            st_temp["cooldown_until"] = _dt_to_iso(datetime.now(timezone.utc) + pd.Timedelta(minutes=COOLDOWN_MINUTES))
-            save_state(st_temp)
+            send_telegram(f"🚨 EMERGENCY: Gagal pasang SL/TP. Posisi DITUTUP OTOMATIS! Err: {e}")
         except Exception as ex:
-            send_telegram(f"💀 FATAL: Gagal eksekusi Batch dan gagal close. CEK BINANCE MANUAL. Err: {repr(ex)}")
-        raise
+            send_telegram(f"💀 FATAL: Gagal pasang SL/TP dan gagal close. CEK BINANCE MANUAL. Err: {repr(ex)}")
+        
+        return 0.0, 0.0, 0.0, 0.0
 
     return actual_entry, sl_q, tp_q, sl_dist
 
@@ -1006,9 +1077,18 @@ def main():
                     step_size = float(_get_symbol_filters(SYMBOL)["LOT_SIZE"]["stepSize"])
                     qty_q = _quantize_step((min_notional * 1.1) / price, step_size)
                     try:
-                        actual_price, sl_final, tp_final, sl_dist_actual = place_order_with_actual_bracket(FORCE_TEST_SIDE, qty_q, float(last_closed["atr"]), st["mode"], price, 1.0, 1.0)
-                        st.update({"trades_today": int(st.get("trades_today", 0)) + 1, "force_test_done": True})
-                        save_state(st)
+                        actual_price, sl_final, tp_final, sl_dist_actual = place_order_with_actual_bracket(
+                            side, qty_q, atr_val, st["mode"], price, sl_mult, tp_mult
+                        )
+                    except Exception as e:
+                        print(f"Entry gagal: {e}")
+                        time.sleep(SLEEP_SLOW)
+                        continue
+
+                    st.update({
+                        ...
+                    })
+                    save_state(st)
                     except Exception as e: print(f"Force test entry gagal: {e}")
                     continue
 
