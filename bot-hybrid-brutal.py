@@ -865,14 +865,14 @@ def main():
                 check_telegram_commands(st)
 
                 # --- HEALTH CHECK TELEGRAM ---
-                if time.time() - last_health_check >= HEALTH_CHECK_S:
-                    last_health_check = time.time()
-                    eq_check = get_wallet_balance_quote()
-                    send_telegram(
-                        f"🤖 {SYMBOL} Health Check\n"
-                        f"Equity: ${eq_check:.2f} | PnL Day: ${st.get('daily_realized_pnl', 0.0):.2f}\n"
-                        f"Trades: {st.get('trades_today', 0)} | Status: {'🟢 In Pos' if st.get('prev_in_position') else '⚪ Idle'}"
-                    )
+              #  if time.time() - last_health_check >= HEALTH_CHECK_S:
+               #     last_health_check = time.time()
+                #    eq_check = get_wallet_balance_quote()
+                 #   send_telegram(
+                  #      f"🤖 {SYMBOL} Health Check\n"
+                   #     f"Equity: ${eq_check:.2f} | PnL Day: ${st.get('daily_realized_pnl', 0.0):.2f}\n"
+                    #    f"Trades: {st.get('trades_today', 0)} | Status: {'🟢 In Pos' if st.get('prev_in_position') else '⚪ Idle'}"
+                    #)
 
                 cur_day = now.date().isoformat()
                 if cur_day != st.get("day_key"):
