@@ -286,6 +286,30 @@ def send_telegram(msg: str):
             )
         except:
             pass
+        
+def setup_telegram_commands():
+    token = os.getenv("TELEGRAM_TOKEN")
+    if not token:
+        return
+
+    commands = {
+        "commands": [
+            {"command": "status", "description": "Lihat status bot"},
+            {"command": "stop_trade", "description": "Pause entry trading"},
+            {"command": "resume_trade", "description": "Lanjutkan trading"},
+            {"command": "stop", "description": "Matikan bot"}
+        ]
+    }
+
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/setMyCommands",
+            json=commands,
+            timeout=10
+        )
+        print("Telegram command menu berhasil dibuat")
+    except Exception as e:
+        print(f"Gagal set Telegram commands: {e}")
 
 
 # =========================
@@ -902,6 +926,9 @@ def manage_break_even(st, mark_price, tick_size, qty_q):
 # MAIN LOOP
 # =========================
 def main():
+    
+    setup_telegram_commands()
+    
     try:
         call_with_retry(client.futures_change_leverage, symbol=SYMBOL, leverage=LEVERAGE, recvWindow=RECV_WINDOW)
     except:
