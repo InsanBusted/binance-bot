@@ -101,27 +101,27 @@ EMA_SLOW = 50
 RSI_LEN = 14
 RSI_TREND_LONG_MIN = 50
 RSI_TREND_SHORT_MAX = 50
-TREND_RR = 1.5  # RR dinaikkan untuk memaksimalkan cuan di saat tren
-TREND_SL_ATR_MULT = 2.0  # SL dilonggarkan sedikit
+TREND_RR = 1.0  # RR dinaikkan untuk memaksimalkan cuan di saat tren
+TREND_SL_ATR_MULT = 2.5  # SL dilonggarkan sedikit
 TREND_SL_MIN_PCT = 0.0060
-TREND_SL_MAX_PCT = 0.0200
+TREND_SL_MAX_PCT = 0.0400
 
 # V6 - structure aware stop loss
 USE_STRUCTURE_SL = True
-SWING_LOOKBACK_BARS = 7
-TREND_SWING_BUFFER_ATR_MULT = 0.5  # Buffer di bawah swing dilebarkan aman dari jarum
-RANGE_SWING_BUFFER_ATR_MULT = 0.15
-TREND_STRUCTURE_SL_HARD_MAX_PCT = 0.0300
-RANGE_STRUCTURE_SL_HARD_MAX_PCT = 0.0120
+SWING_LOOKBACK_BARS = 20
+TREND_SWING_BUFFER_ATR_MULT = 1.5  # Buffer di bawah swing dilebarkan aman dari jarum
+RANGE_SWING_BUFFER_ATR_MULT = 1.0
+TREND_STRUCTURE_SL_HARD_MAX_PCT = 0.0500
+RANGE_STRUCTURE_SL_HARD_MAX_PCT = 0.0250
 
 # RANGE entry (Tetap ada tapi tidak dieksekusi selama ENABLE_RANGE_MODE = False)
 DONCHIAN_LEN = 16
 RSI_RANGE_LONG_MIN = 43
 RSI_RANGE_SHORT_MAX = 57
-RANGE_RR = 1.0
-RANGE_SL_ATR_MULT = 0.8
+RANGE_RR = 0.8
+RANGE_SL_ATR_MULT = 1.5
 RANGE_SL_MIN_PCT = 0.0018
-RANGE_SL_MAX_PCT = 0.0070
+RANGE_SL_MAX_PCT = 0.0200
 
 # Risk
 RISK_PCT = 0.005
