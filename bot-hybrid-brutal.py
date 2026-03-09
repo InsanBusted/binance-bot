@@ -358,6 +358,19 @@ def get_position_amt():
         return 0.0
     return float(pos[0].get("positionAmt", 0.0)) if pos else 0.0
 
+def get_unrealized_pnl():
+    try:
+        pos = call_with_retry(
+            client.futures_position_information,
+            symbol=SYMBOL,
+            recvWindow=RECV_WINDOW
+        )
+        if pos:
+            return float(pos[0].get("unRealizedProfit", 0.0))
+    except:
+        pass
+    return 0.0
+
 def realized_pnl_since(start_ms, seen_tran_ids):
     try:
         incomes = call_with_retry(
