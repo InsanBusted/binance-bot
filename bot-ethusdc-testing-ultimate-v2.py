@@ -709,6 +709,9 @@ def main():
                 st["prev_in_position"] = True
                 mark_price = get_mark_price()
                 manage_break_even(st, mark_price, tick_size, st.get("qty_q", 0.0))
+                
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] 🟢 Bot aktif menjaga posisi | Harga saat ini: {mark_price}")
+                
                 time.sleep(SLEEP_SLOW)
                 continue
 
