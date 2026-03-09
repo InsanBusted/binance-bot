@@ -483,21 +483,35 @@ def check_telegram_commands(st):
                 st["last_tg_update_id"] = update_id
                 
                 if text == "/status":
-                    eq = get_wallet_balance_quote()
-                    msg = (
-                        f"📊 *STATUS REPORT*\n"
-                        f"━━━━━━━━━━━━━━━\n"
-                        f"💰 Equity: ${eq:.2f}\n"
-                        f"📈 PnL Today: ${st.get('daily_realized_pnl', 0.0):.2f}\n"
-                        f"🔄 Trades: {st.get('trades_today', 0)}\n"
-                        f"🤖 Mode: {st.get('mode', 'N/A')}\n"
-                        f"📍 Status: {'🟢 IN POSITION' if st.get('prev_in_position') else '⚪ IDLE'}"
+                    eq = get_wallet_balance_usdc()
+                    upnl = get_unrealized_pnl()
+                    pos_amt = get_position_amt()
+                    in_pos = abs(pos_amt) > 0
+
+                    send_telegram(
+                        f"📊 STATUS {SYMBOL}\n"
+                        f"Equity: ${eq:.2f}\n"
+                        f"uPnL: ${upnl:.4f}\n"
+                        f"Trades today: {st.get('trades_today', 0)}\n"
+                        f"Daily PnL: ${st.get('daily_realized_pnl', 0.0):.4f}\n"
+                        f"Mode: {st.get('mode', '-')}\n"
+                        f"In Position: {in_pos}\n"
+                        f"Trade Paused: {st.get('trade_paused', False)}"
                     )
-                    send_telegram(msg)
-                
+
+                elif text == "/stop_trade":
+                    st["trade_paused"] = True
+                    save_state(st)
+                    send_telegram("⏸ Trading di-pause. Bot tetap hidup, tapi tidak akan entry baru.")
+
+                elif text == "/resume_trade":
+                    st["trade_paused"] = False
+                    save_state(st)
+                    send_telegram("▶️ Trading dilanjutkan. Bot boleh entry lagi.")
+
                 elif text == "/stop":
-                    send_telegram("⚠️ Emergency Stop received! Bot shutting down...")
-                    os._exit(0) # Mematikan bot secara paksa
+                    send_telegram("🛑 Bot dihentikan dari Telegram command.")
+                    os._exit(0)
                     
     except Exception as e:
         # Print error agar terekam di log PM2 (Perbaikan Bug 4)
@@ -913,6 +927,8 @@ def main():
         "entry_price": 0.0, "sl_dist_actual": 0.0, "pos_side": "",
         "be_activated": False, "be_failed_once": False, "qty_q": 0.0,
         "force_test_done": False, "margin_trap_alert_sent": False,
+        "pnl_wait_notified": False,
+        "trade_paused": False
     })
 
     # Variabel Kontrol Loop
@@ -1032,6 +1048,11 @@ def main():
                     else:
                         st["cooldown_until"] = _dt_to_iso(now + pd.Timedelta(minutes=COOLDOWN_MINUTES))
                     save_state(st)
+                    
+                if st.get("trade_paused", False):
+                    print(f"[{now.strftime('%H:%M:%S')}] Trading sedang di-pause dari Telegram")
+                    time.sleep(SLEEP_SLOW)
+                    continue                    
 
             # ==========================================
             # 3. LOOP ENTRY (HANYA SAAT CANDLE TUTUP)
