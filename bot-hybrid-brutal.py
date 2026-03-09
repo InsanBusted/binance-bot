@@ -1072,24 +1072,36 @@ def main():
                 last_closed = _last_closed(df5)
                 price = current_mark_price if current_mark_price > 0 else float(last_closed["close"])
 
-                # Logika Force Test Entry
+# Logika Force Test Entry
                 if FORCE_TEST_ENTRY and not st.get("force_test_done", False):
                     step_size = float(_get_symbol_filters(SYMBOL)["LOT_SIZE"]["stepSize"])
                     qty_q = _quantize_step((min_notional * 1.1) / price, step_size)
+                    print(f"🧪 MENJALANKAN FORCE_TEST_ENTRY | Qty: {qty_q}")
+                    
                     try:
                         actual_price, sl_final, tp_final, sl_dist_actual = place_order_with_actual_bracket(
                             side, qty_q, atr_val, st["mode"], price, sl_mult, tp_mult
                         )
+                        
+                        st.update({
+                            "trades_today": int(st.get("trades_today", 0)) + 1,
+                            "cooldown_until": _dt_to_iso(datetime.now(timezone.utc) + pd.Timedelta(minutes=COOLDOWN_MINUTES)),
+                            "entry_price": actual_price,
+                            "sl_dist_actual": sl_dist_actual,
+                            "pos_side": "LONG" if side == "BUY" else "SHORT",
+                            "qty_q": qty_q,
+                            "be_activated": False,
+                            "be_failed_once": False,
+                            "position_open_ms": int(time.time() * 1000),
+                            "force_test_done": True
+                        })
+                        save_state(st)
+                        print(f"✅ Force test sukses. Entry: {actual_price}")
+                        
                     except Exception as e:
-                        print(f"Entry gagal: {e}")
+                        print(f"❌ Force test entry gagal: {e}")
                         time.sleep(SLEEP_SLOW)
-                        continue
-
-                    st.update({
-                        ...
-                    })
-                    save_state(st)
-                    except Exception as e: print(f"Force test entry gagal: {e}")
+                    
                     continue
 
                 # DETEKSI SINYAL
@@ -1172,7 +1184,6 @@ def main():
                         )
 
             time.sleep(0.1)
-            
 
     except Exception as e:
         print(f"Loop Error: {e}")
