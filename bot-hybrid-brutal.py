@@ -678,7 +678,7 @@ def place_order_with_actual_bracket(side: str, qty_q: float, atr_val: float, mod
     try:
         responses = call_with_retry(
             client.futures_place_batch_order,
-            batchOrders=json.dumps(batch_payload),
+            batchOrders=batch_payload,  # Hapus json.dumps() di sini
             recvWindow=RECV_WINDOW
         )
         if responses and isinstance(responses, list):
